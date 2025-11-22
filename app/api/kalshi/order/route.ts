@@ -1,6 +1,7 @@
 // ============================================
 // MRKT - Kalshi Order API
-// Server-side RSA-SHA256 signed orders
+// Server-side RSA-PSS/SHA256 signed orders
+// Based on: https://docs.kalshi.com/getting_started/quick_start_authenticated_requests
 // ============================================
 
 import { NextRequest, NextResponse } from "next/server";
@@ -33,22 +34,31 @@ interface OrderResponse {
   message?: string;
 }
 
-// Generate RSA-SHA256 signature for Kalshi API
+// Generate RSA-PSS/SHA256 signature for Kalshi API
+// Per Kalshi docs: Sign with RSA-PSS padding, MGF1 with SHA256
 function generateSignature(
-  timestamp: string,
+  timestampMs: string,
   method: string,
-  path: string,
-  body?: string
+  path: string
 ): string {
   if (!KALSHI_PRIVATE_KEY) {
     throw new Error("Kalshi private key not configured");
   }
 
-  const message = `${timestamp}${method}${path}${body || ""}`;
-  const sign = crypto.createSign("RSA-SHA256");
-  sign.update(message);
-  sign.end();
-  return sign.sign(KALSHI_PRIVATE_KEY, "base64");
+  // Strip query params from path for signing
+  const pathWithoutQuery = path.split("?")[0];
+
+  // Message format: timestamp + method + path (without query params)
+  const message = `${timestampMs}${method}${pathWithoutQuery}`;
+
+  // Use RSA-PSS with SHA256 (correct algorithm per Kalshi docs)
+  const signature = crypto.sign("sha256", Buffer.from(message), {
+    key: KALSHI_PRIVATE_KEY,
+    padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+    saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
+  });
+
+  return signature.toString("base64");
 }
 
 // Make authenticated request to Kalshi API
@@ -57,10 +67,11 @@ async function authenticatedRequest<T>(
   path: string,
   body?: object
 ): Promise<T> {
-  const timestamp = Math.floor(Date.now() / 1000).toString();
+  // Timestamp in MILLISECONDS (per Kalshi docs)
+  const timestampMs = Date.now().toString();
   const bodyString = body ? JSON.stringify(body) : undefined;
 
-  const signature = generateSignature(timestamp, method, path, bodyString);
+  const signature = generateSignature(timestampMs, method, path);
 
   const response = await fetch(`${KALSHI_URL}${path}`, {
     method,
@@ -68,7 +79,7 @@ async function authenticatedRequest<T>(
       "Content-Type": "application/json",
       "KALSHI-ACCESS-KEY": KALSHI_API_KEY_ID!,
       "KALSHI-ACCESS-SIGNATURE": signature,
-      "KALSHI-ACCESS-TIMESTAMP": timestamp,
+      "KALSHI-ACCESS-TIMESTAMP": timestampMs,
     },
     body: bodyString,
   });

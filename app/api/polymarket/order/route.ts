@@ -15,7 +15,7 @@ const POLY_BUILDER_PASSPHRASE = process.env.POLY_BUILDER_PASSPHRASE;
 const POLY_CLOB_URL = process.env.POLY_CLOB_URL || "https://clob.polymarket.com";
 
 // Check if builder credentials are configured
-const isBuilderConfigured = POLY_BUILDER_API_KEY && POLY_BUILDER_SECRET && POLY_BUILDER_PASSPHRASE;
+const isBuilderConfigured = Boolean(POLY_BUILDER_API_KEY && POLY_BUILDER_SECRET && POLY_BUILDER_PASSPHRASE);
 
 interface OrderRequest {
   // Market details
