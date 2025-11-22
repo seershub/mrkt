@@ -239,12 +239,23 @@ export async function POST(request: NextRequest) {
 
     console.log("[MRKT] Proxy deployment result:", deployResult);
 
-    // Poll for completion if needed
-    if (deployResult.transactionID) {
+    // Wait for transaction to complete and get proxy address
+    let proxyAddress: string | undefined;
+    let transactionHash: string | undefined = deployResult.transactionHash || deployResult.hash;
+
+    // Use wait() to get the final transaction with proxyAddress
+    const transaction = await deployResult.wait();
+    if (transaction) {
+      proxyAddress = transaction.proxyAddress;
+      transactionHash = transaction.transactionHash || transactionHash;
+    }
+
+    // Fallback: poll if wait() didn't return transaction
+    if (!proxyAddress && deployResult.transactionID) {
       const finalResult = await relayClient.pollUntilState(
         deployResult.transactionID,
-        ["CONFIRMED", "COMPLETED"],
-        "FAILED",
+        ["STATE_CONFIRMED", "STATE_MINED"],
+        "STATE_FAILED",
         30, // Max polls
         2000 // Poll frequency (2s)
       );
@@ -254,11 +265,23 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    if (!proxyAddress) {
+      // Query the proxy address after deployment
+      const proxyResponse = await fetch(
+        `${POLY_RELAYER_URL}/proxy/${wallet.address}`,
+        { headers: { Accept: "application/json" } }
+      );
+      if (proxyResponse.ok) {
+        const proxyData = await proxyResponse.json();
+        proxyAddress = proxyData.proxy || proxyData.address || proxyData.safeAddress;
+      }
+    }
+
     const response: ApiResponse<{ proxyAddress: string; txHash?: string; transactionId?: string }> = {
       success: true,
       data: {
-        proxyAddress: deployResult.safeAddress || deployResult.address,
-        txHash: deployResult.txHash,
+        proxyAddress: proxyAddress || wallet.address, // Fallback to EOA if proxy not found
+        txHash: transactionHash,
         transactionId: deployResult.transactionID,
       },
       timestamp: new Date().toISOString(),
