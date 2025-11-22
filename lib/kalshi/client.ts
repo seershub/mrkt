@@ -1,7 +1,6 @@
 import crypto from 'crypto';
 
-const KALSHI_API_URL = 'https://trading-api.kalshi.com/trade-api/v2';
-// Use sandbox for dev if needed: 'https://demo-api.kalshi.co/trade-api/v2'
+const KALSHI_API_URL = process.env.KALSHI_API_URL || 'https://api.elections.kalshi.com';
 
 export class KalshiClient {
     private keyId: string;

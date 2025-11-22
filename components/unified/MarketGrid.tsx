@@ -7,8 +7,12 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { TrendingUp, Droplets, Clock } from 'lucide-react';
-import { cn } from '@/lib/utils';
 import { TradeModal } from '@/components/unified/TradeModal';
+import { FilterState } from '@/components/unified/MarketFilters';
+
+interface MarketGridProps {
+    filters?: FilterState;
+}
 
 function MarketCard({ market }: { market: UnifiedMarket }) {
     const yesOutcome = market.outcomes.find(o => o.label === 'Yes') || market.outcomes[0];
@@ -37,7 +41,6 @@ function MarketCard({ market }: { market: UnifiedMarket }) {
 
             <CardContent className="pb-2">
                 <div className="grid grid-cols-2 gap-3 mt-2">
-                    {/* YES Button */}
                     <TradeModal market={market} outcome={yesOutcome}>
                         <Button
                             variant="outline"
@@ -49,7 +52,6 @@ function MarketCard({ market }: { market: UnifiedMarket }) {
                         </Button>
                     </TradeModal>
 
-                    {/* NO Button */}
                     <TradeModal market={market} outcome={noOutcome}>
                         <Button
                             variant="outline"
@@ -70,14 +72,14 @@ function MarketCard({ market }: { market: UnifiedMarket }) {
                 </div>
                 <div className="flex items-center gap-1">
                     <Droplets className="w-3 h-3 text-blue-400" />
-                    <span className="font-mono">${(market.liquidity || 0 / 1000).toFixed(1)}K Liq</span>
+                    <span className="font-mono">${((market.liquidity || 0) / 1000).toFixed(1)}K Liq</span>
                 </div>
             </CardFooter>
         </Card>
     );
 }
 
-export function MarketGrid() {
+export function MarketGrid({ filters }: MarketGridProps) {
     const { data, isLoading, error } = useQuery({
         queryKey: ['markets'],
         queryFn: async () => {
@@ -105,7 +107,31 @@ export function MarketGrid() {
         );
     }
 
-    const markets = data?.markets || [];
+    let markets = data?.markets || [];
+
+    // Apply filters
+    if (filters) {
+        markets = markets.filter((market: UnifiedMarket) => {
+            if (filters.search && !market.question.toLowerCase().includes(filters.search.toLowerCase())) {
+                return false;
+            }
+            if (filters.source !== 'ALL' && market.source !== filters.source) {
+                return false;
+            }
+            if (filters.category !== 'All' && market.category !== filters.category) {
+                return false;
+            }
+            return true;
+        });
+    }
+
+    if (markets.length === 0) {
+        return (
+            <div className="text-center py-20">
+                <p className="text-xl text-muted-foreground">No markets found matching your filters</p>
+            </div>
+        );
+    }
 
     return (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-fade-in">
