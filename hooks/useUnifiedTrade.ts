@@ -9,7 +9,15 @@ import { useState, useCallback, useEffect } from "react";
 import { useAccount, useSignTypedData, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { parseUnits, formatUnits, Address, Hex } from "viem";
 import { polygon } from "viem/chains";
-import { CONTRACTS, TRADING } from "@/lib/constants";
+import { CONTRACTS, TRADING, API_ENDPOINTS } from "@/lib/constants";
+
+// Polymarket Signature Types per docs
+// https://docs.polymarket.com/developers/clob-api/authentication
+const SIGNATURE_TYPE = {
+  EOA: 0, // Trading directly from EOA (no proxy)
+  POLY_PROXY: 1, // MagicLink/email users with proxy
+  POLY_GNOSIS_SAFE: 2, // MetaMask/browser wallet users with proxy
+} as const;
 import { useDebugStore } from "@/lib/stores/debug-store";
 import { Platform, UnifiedMarket, MarketOutcome, ApiResponse } from "@/types";
 
@@ -44,13 +52,18 @@ const USDC_ABI = [
   },
 ] as const;
 
-// Polymarket EIP-712 Domain
-const POLYMARKET_DOMAIN = {
-  name: "Polymarket CTF Exchange",
-  version: "1",
-  chainId: polygon.id,
-  verifyingContract: CONTRACTS.POLYMARKET_EXCHANGE as Address,
-} as const;
+// Polymarket EIP-712 Domain (use function to handle negRisk markets)
+// Per docs: negRisk markets use Neg Risk CTF Exchange
+function getPolymarketDomain(isNegRisk: boolean = false) {
+  return {
+    name: "Polymarket CTF Exchange",
+    version: "1",
+    chainId: polygon.id,
+    verifyingContract: (isNegRisk
+      ? CONTRACTS.POLYMARKET_NEG_RISK_EXCHANGE
+      : CONTRACTS.POLYMARKET_EXCHANGE) as Address,
+  } as const;
+}
 
 // Polymarket Order Types for EIP-712
 const ORDER_TYPES = {
@@ -444,9 +457,19 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         const sharesWei = parseUnits(shares.toFixed(TRADING.SHARE_DECIMALS), TRADING.SHARE_DECIMALS);
         const costWei = parseUnits(amount.toFixed(TRADING.USDC_DECIMALS), TRADING.USDC_DECIMALS);
 
+        // Determine exchange contract based on negRisk
+        // Per docs: negRisk markets use POLYMARKET_NEG_RISK_EXCHANGE
+        const exchangeContract = market.negRisk
+          ? CONTRACTS.POLYMARKET_NEG_RISK_EXCHANGE
+          : CONTRACTS.POLYMARKET_EXCHANGE;
+
         // Create order object
         const salt = Math.floor(Math.random() * 1000000000);
         const expiration = Math.floor(Date.now() / 1000) + 86400; // 24h
+
+        // Per docs: When using proxy wallet with browser wallet (MetaMask),
+        // use POLY_GNOSIS_SAFE (type 2) signature type
+        const signatureType = SIGNATURE_TYPE.POLY_GNOSIS_SAFE;
 
         const orderMessage = {
           salt: BigInt(salt),
@@ -460,19 +483,22 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
           nonce: BigInt(0),
           feeRateBps: BigInt(0),
           side: side === "buy" ? 0 : 1,
-          signatureType: 0,
+          signatureType: signatureType,
         };
+
+        // Get correct domain for this market type
+        const domain = getPolymarketDomain(market.negRisk ?? false);
 
         addLog({
           level: "debug",
           message: "Signing EIP-712 order",
           source: "trade",
-          data: { orderMessage },
+          data: { orderMessage, domain, exchangeContract },
         });
 
-        // Sign the order
+        // Sign the order with correct domain
         const signature = await signTypedDataAsync({
-          domain: POLYMARKET_DOMAIN,
+          domain,
           types: ORDER_TYPES,
           primaryType: "Order",
           message: orderMessage,
@@ -487,6 +513,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         });
 
         // Build the signed order object matching SDK format
+        // Per docs: signatureType must match wallet type
         const signedOrder = {
           salt: salt.toString(),
           maker: proxyStatus.proxyAddress!,
@@ -499,7 +526,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
           nonce: "0",
           feeRateBps: "0",
           side: side === "buy" ? 0 : 1,
-          signatureType: 0,
+          signatureType: signatureType, // Type 2 for POLY_GNOSIS_SAFE
           signature: signature,
         };
 
