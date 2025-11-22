@@ -156,12 +156,13 @@ export function MarketCard({ market, onSelect, compact = false }: MarketCardProp
             <a
               href={
                 market.platform === "polymarket"
-                  ? `https://polymarket.com/event/${market.platformId}`
+                  ? `https://polymarket.com/event/${market.slug || market.platformId}`
                   : `https://kalshi.com/markets/${market.platformId}`
               }
               target="_blank"
               rel="noopener noreferrer"
               className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-brand-400"
+              onClick={(e) => e.stopPropagation()}
             >
               <ExternalLink className="w-3.5 h-3.5" />
             </a>

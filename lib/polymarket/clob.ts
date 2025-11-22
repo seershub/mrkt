@@ -131,6 +131,8 @@ export function transformPolymarketEvent(event: PolymarketEvent & { negRisk?: bo
     return {
       id: `poly_${market.id}`,
       platformId: market.id,
+      // Use event slug for URL (Polymarket URLs are /event/{slug})
+      slug: event.slug || market.slug,
       platform: "polymarket",
       title: market.question || event.title,
       description: market.description || event.description,
@@ -161,6 +163,8 @@ export function transformPolymarketMarket(market: PolymarketMarket): UnifiedMark
   return {
     id: `poly_${market.id}`,
     platformId: market.id,
+    // Use market slug for URL
+    slug: market.slug,
     platform: "polymarket",
     title: market.question,
     description: market.description,

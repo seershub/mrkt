@@ -31,6 +31,8 @@ export interface UnifiedMarket {
   id: string;
   // Original platform ID
   platformId: string;
+  // URL slug for linking to platform (Polymarket uses slug in URLs)
+  slug?: string;
   // Source platform
   platform: Platform;
   // Market question/title
