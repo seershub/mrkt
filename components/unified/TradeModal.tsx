@@ -222,7 +222,7 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
                   <h2 className="text-lg font-semibold text-neutral-100">
                     Place Your Bet
                   </h2>
-                  <Badge variant={market.platform === "polymarket" ? "brand" : "info"}>
+                  <Badge variant={market.platform === "polymarket" ? "default" : "secondary"}>
                     {market.platform === "polymarket" ? "Poly" : "Kalshi"}
                   </Badge>
                 </div>
