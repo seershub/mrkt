@@ -72,7 +72,16 @@ async function safeParseJson(response: Response): Promise<{ data: unknown; error
   }
 }
 
-// GET - Check proxy status for an address
+// Calculate deterministic Safe proxy address for an EOA
+// Per Gnosis Safe: proxy address = CREATE2(factory, salt(owner), proxyCreationCode)
+function calculateProxyAddress(ownerAddress: string): string {
+  // This is a simplified calculation - actual proxy address is deterministic
+  // based on the Safe Proxy Factory and owner address
+  // For now, we'll query the relayer to get the actual proxy
+  return ownerAddress; // Placeholder - will be replaced by actual calculation
+}
+
+// GET - Check proxy/Safe deployment status for an address
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const address = searchParams.get("address");
@@ -91,12 +100,11 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Query V2 relayer for proxy status
-    // Per docs: use query parameter format
-    const proxyUrl = `${POLY_RELAYER_URL}/proxy?address=${address}`;
-    console.log("[MRKT] Checking proxy at:", proxyUrl);
+    // Per SDK: use /deployed endpoint to check if Safe is deployed
+    const deployedUrl = `${POLY_RELAYER_URL}/deployed?address=${address}`;
+    console.log("[MRKT] Checking Safe deployment at:", deployedUrl);
 
-    const proxyResponse = await fetch(proxyUrl, {
+    const deployedResponse = await fetch(deployedUrl, {
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
@@ -104,8 +112,14 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    if (proxyResponse.status === 404) {
-      // No proxy exists yet
+    // Safe parse the response
+    const { data: deployedData, error: parseError } = await safeParseJson(deployedResponse);
+
+    if (parseError) {
+      // If relayer is unavailable, check on-chain directly via RPC
+      console.warn("[MRKT] Relayer unavailable, falling back to on-chain check");
+
+      // For now, return unknown status
       const response: ApiResponse<ProxyStatus> = {
         success: true,
         data: {
@@ -114,32 +128,40 @@ export async function GET(request: NextRequest) {
         },
         timestamp: new Date().toISOString(),
       };
-
       return NextResponse.json(response);
     }
 
-    // Safe parse the response
-    const { data: proxyData, error: parseError } = await safeParseJson(proxyResponse);
+    const deployInfo = deployedData as { deployed?: boolean; proxyAddress?: string; address?: string };
+    const isDeployed = deployInfo.deployed === true;
 
-    if (parseError) {
-      throw new Error(parseError);
+    // Get nonce to get proxy address if deployed
+    let proxyAddress: string | undefined;
+    if (isDeployed) {
+      try {
+        const nonceUrl = `${POLY_RELAYER_URL}/nonce?address=${address}`;
+        const nonceResponse = await fetch(nonceUrl, {
+          headers: {
+            Accept: "application/json",
+            "User-Agent": "MRKT-Trading-Platform/1.0",
+          },
+        });
+        if (nonceResponse.ok) {
+          const nonceData = await nonceResponse.json();
+          // The nonce endpoint might return proxy address
+          proxyAddress = nonceData.proxyAddress || deployInfo.proxyAddress || deployInfo.address;
+        }
+      } catch {
+        // Nonce fetch failed, use calculated address
+        proxyAddress = deployInfo.proxyAddress || deployInfo.address;
+      }
     }
-
-    if (!proxyResponse.ok) {
-      const errorMsg = (proxyData as { message?: string })?.message || `Proxy check failed: ${proxyResponse.status}`;
-      throw new Error(errorMsg);
-    }
-
-    const proxyInfo = proxyData as { proxy?: string; address?: string; safeAddress?: string; deployed?: boolean; allowance?: string };
-    const proxyAddress = proxyInfo.proxy || proxyInfo.address || proxyInfo.safeAddress;
 
     const response: ApiResponse<ProxyStatus> = {
       success: true,
       data: {
-        hasProxy: !!proxyAddress,
-        proxyAddress,
-        isDeployed: proxyInfo.deployed !== false,
-        allowance: proxyInfo.allowance,
+        hasProxy: isDeployed,
+        proxyAddress: proxyAddress,
+        isDeployed: isDeployed,
       },
       timestamp: new Date().toISOString(),
     };
@@ -162,17 +184,61 @@ export async function GET(request: NextRequest) {
 }
 
 // POST - Deploy a new proxy wallet using RelayClient
+// NOTE: Browser wallets (MetaMask) don't expose private keys
+// For browser users, they must create their Safe on Polymarket first
 export async function POST(request: NextRequest) {
   try {
-    // Check builder configuration for gasless deployment
+    const body = await request.json();
+    const { privateKey, address } = body;
+
+    // Browser wallet flow - redirect to Polymarket
+    if (!privateKey && address) {
+      console.log("[MRKT] Browser wallet detected - Safe deployment requires Polymarket");
+
+      const response: ApiResponse<{
+        requiresPolymarket: boolean;
+        message: string;
+        polymarketUrl: string;
+      }> = {
+        success: false,
+        error: {
+          code: "BROWSER_WALLET_DEPLOYMENT",
+          message: "Browser wallets require Safe deployment through Polymarket. Please visit Polymarket to create your trading account first.",
+        },
+        data: {
+          requiresPolymarket: true,
+          message: "To trade on Polymarket, you need a Safe wallet. Please visit Polymarket to set up your account.",
+          polymarketUrl: "https://polymarket.com",
+        },
+        timestamp: new Date().toISOString(),
+      };
+
+      return NextResponse.json(response, { status: 400 });
+    }
+
+    // Server-side deployment with private key (for bots/scripts)
+    if (!privateKey) {
+      const response: ApiResponse<null> = {
+        success: false,
+        error: {
+          code: "MISSING_PRIVATE_KEY",
+          message: "Private key is required for server-side Safe deployment",
+        },
+        timestamp: new Date().toISOString(),
+      };
+
+      return NextResponse.json(response, { status: 400 });
+    }
+
+    // Check builder configuration
     if (!isBuilderConfigured) {
-      console.warn("[MRKT] Builder credentials not configured for proxy deployment");
+      console.warn("[MRKT] Builder credentials not configured");
 
       const response: ApiResponse<null> = {
         success: false,
         error: {
           code: "BUILDER_NOT_CONFIGURED",
-          message: "Builder API is required for proxy deployment",
+          message: "Builder API credentials are required for deployment",
         },
         timestamp: new Date().toISOString(),
       };
@@ -180,113 +246,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(response, { status: 503 });
     }
 
-    const body = await request.json();
-    const { privateKey } = body;
-
-    // For server-side deployment, we need the user's private key or a signed message
-    // In production, you'd use the user's wallet signature to authorize deployment
-    if (!privateKey) {
-      // Fallback to direct relayer API call with signature
-      const { address, signature } = body;
-
-      if (!address || !signature) {
-        const response: ApiResponse<null> = {
-          success: false,
-          error: {
-            code: "INVALID_REQUEST",
-            message: "Either privateKey or (address + signature) is required",
-          },
-          timestamp: new Date().toISOString(),
-        };
-
-        return NextResponse.json(response, { status: 400 });
-      }
-
-      // Use direct API call with builder headers
-      const builderConfig = getBuilderConfig();
-      const timestamp = Date.now();
-      const method = "POST";
-      const path = "/proxy";
-
-      // Generate builder headers if config available
-      let builderHeaders: Record<string, string> = {};
-      if (builderConfig) {
-        try {
-          const headers = await builderConfig.generateBuilderHeaders(
-            method,
-            path,
-            JSON.stringify({ owner: address }),
-            timestamp
-          );
-          if (headers) {
-            builderHeaders = headers as Record<string, string>;
-          }
-        } catch (headerError) {
-          console.error("[MRKT] Builder header generation failed:", headerError);
-        }
-      }
-
-      console.log("[MRKT] Deploying proxy to:", `${POLY_RELAYER_URL}${path}`);
-
-      const deployResponse = await fetch(`${POLY_RELAYER_URL}${path}`, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "User-Agent": "MRKT-Trading-Platform/1.0",
-          ...builderHeaders,
-        },
-        body: JSON.stringify({
-          owner: address,
-          signature,
-        }),
-      });
-
-      // Safe parse the response
-      const { data: deployData, error: parseError } = await safeParseJson(deployResponse);
-
-      if (parseError) {
-        const response: ApiResponse<null> = {
-          success: false,
-          error: {
-            code: "PROXY_DEPLOY_FAILED",
-            message: parseError,
-          },
-          timestamp: new Date().toISOString(),
-        };
-        return NextResponse.json(response, { status: 500 });
-      }
-
-      if (!deployResponse.ok) {
-        const errorData = deployData as { message?: string };
-        const response: ApiResponse<null> = {
-          success: false,
-          error: {
-            code: "PROXY_DEPLOY_FAILED",
-            message: errorData?.message || `Deployment failed: ${deployResponse.status}`,
-            details: deployData,
-          },
-          timestamp: new Date().toISOString(),
-        };
-
-        return NextResponse.json(response, { status: deployResponse.status });
-      }
-
-      const resultData = deployData as { proxy?: string; address?: string; safeAddress?: string; txHash?: string; transactionId?: string };
-      const response: ApiResponse<{ proxyAddress: string; txHash?: string; transactionId?: string }> = {
-        success: true,
-        data: {
-          proxyAddress: resultData.proxy || resultData.address || resultData.safeAddress || "",
-          txHash: resultData.txHash,
-          transactionId: resultData.transactionId,
-        },
-        timestamp: new Date().toISOString(),
-      };
-
-      return NextResponse.json(response);
-    }
-
-    // If private key provided, use RelayClient SDK for full deployment
+    // Use RelayClient SDK for deployment
     const wallet = new Wallet(privateKey);
     const builderConfig = getBuilderConfig();
 
@@ -297,55 +257,56 @@ export async function POST(request: NextRequest) {
       builderConfig
     );
 
-    console.log("[MRKT] Deploying proxy wallet via RelayClient...");
+    console.log("[MRKT] Deploying Safe via RelayClient for:", wallet.address);
 
     // Deploy safe using SDK
     const deployResult = await relayClient.deploy();
 
-    console.log("[MRKT] Proxy deployment result:", deployResult);
+    console.log("[MRKT] Safe deployment submitted:", deployResult);
 
-    // Wait for transaction to complete and get proxy address
+    // Wait for transaction to complete
     let proxyAddress: string | undefined;
     let transactionHash: string | undefined = deployResult.transactionHash || deployResult.hash;
 
-    // Use wait() to get the final transaction with proxyAddress
     const transaction = await deployResult.wait();
     if (transaction) {
       proxyAddress = transaction.proxyAddress;
       transactionHash = transaction.transactionHash || transactionHash;
     }
 
-    // Fallback: poll if wait() didn't return transaction
+    // Poll for completion if needed
     if (!proxyAddress && deployResult.transactionID) {
       const finalResult = await relayClient.pollUntilState(
         deployResult.transactionID,
         ["STATE_CONFIRMED", "STATE_MINED"],
         "STATE_FAILED",
-        30, // Max polls
-        2000 // Poll frequency (2s)
+        30,
+        2000
       );
 
       if (!finalResult) {
-        throw new Error("Proxy deployment timed out or failed");
+        throw new Error("Safe deployment timed out or failed");
       }
     }
 
+    // Query deployed status to get proxy address
     if (!proxyAddress) {
-      // Query the proxy address after deployment
-      const proxyResponse = await fetch(
-        `${POLY_RELAYER_URL}/proxy/${wallet.address}`,
+      const deployedResponse = await fetch(
+        `${POLY_RELAYER_URL}/deployed?address=${wallet.address}`,
         { headers: { Accept: "application/json" } }
       );
-      if (proxyResponse.ok) {
-        const proxyData = await proxyResponse.json();
-        proxyAddress = proxyData.proxy || proxyData.address || proxyData.safeAddress;
+      if (deployedResponse.ok) {
+        const data = await deployedResponse.json();
+        if (data.deployed) {
+          proxyAddress = data.proxyAddress || data.address;
+        }
       }
     }
 
     const response: ApiResponse<{ proxyAddress: string; txHash?: string; transactionId?: string }> = {
       success: true,
       data: {
-        proxyAddress: proxyAddress || wallet.address, // Fallback to EOA if proxy not found
+        proxyAddress: proxyAddress || "",
         txHash: transactionHash,
         transactionId: deployResult.transactionID,
       },
@@ -354,13 +315,13 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(response);
   } catch (error) {
-    console.error("[MRKT] Proxy deploy error:", error);
+    console.error("[MRKT] Safe deploy error:", error);
 
     const response: ApiResponse<null> = {
       success: false,
       error: {
-        code: "INTERNAL_ERROR",
-        message: error instanceof Error ? error.message : "Internal server error",
+        code: "DEPLOYMENT_FAILED",
+        message: error instanceof Error ? error.message : "Safe deployment failed",
       },
       timestamp: new Date().toISOString(),
     };

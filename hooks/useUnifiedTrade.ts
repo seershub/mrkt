@@ -9,7 +9,7 @@ import { useState, useCallback, useEffect } from "react";
 import { useAccount, useSignTypedData, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { parseUnits, formatUnits, Address, Hex } from "viem";
 import { polygon } from "viem/chains";
-import { CONTRACTS, TRADING, API_ENDPOINTS } from "@/lib/constants";
+import { CONTRACTS, TRADING, API_ENDPOINTS, APPROVAL_TARGETS } from "@/lib/constants";
 
 // Polymarket Signature Types per docs
 // https://docs.polymarket.com/developers/clob-api/authentication
@@ -168,13 +168,28 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     },
   });
 
-  // Read USDC allowance for the exchange
+  // Read USDC allowance for the CTF (Conditional Tokens Framework)
+  // Per Polymarket docs: USDC must be approved to CTF, not the Exchange
   const { data: usdcAllowanceRaw } = useReadContract({
     address: CONTRACTS.USDC as Address,
     abi: USDC_ABI,
     functionName: "allowance",
     args: proxyStatus?.proxyAddress
-      ? [proxyStatus.proxyAddress as Address, CONTRACTS.POLYMARKET_EXCHANGE as Address]
+      ? [proxyStatus.proxyAddress as Address, APPROVAL_TARGETS.STANDARD as Address]
+      : undefined,
+    query: {
+      enabled: !!proxyStatus?.proxyAddress,
+      refetchInterval: 10000,
+    },
+  });
+
+  // Also check Neg Risk Adapter allowance for neg risk markets
+  const { data: negRiskAllowanceRaw } = useReadContract({
+    address: CONTRACTS.USDC as Address,
+    abi: USDC_ABI,
+    functionName: "allowance",
+    args: proxyStatus?.proxyAddress
+      ? [proxyStatus.proxyAddress as Address, APPROVAL_TARGETS.NEG_RISK as Address]
       : undefined,
     query: {
       enabled: !!proxyStatus?.proxyAddress,
@@ -189,6 +204,10 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
 
   const usdcAllowance = usdcAllowanceRaw
     ? parseFloat(formatUnits(usdcAllowanceRaw as bigint, TRADING.USDC_DECIMALS))
+    : 0;
+
+  const negRiskAllowance = negRiskAllowanceRaw
+    ? parseFloat(formatUnits(negRiskAllowanceRaw as bigint, TRADING.USDC_DECIMALS))
     : 0;
 
   // Update debug store with balance
@@ -262,6 +281,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
   }, [address, addLog]);
 
   // Deploy proxy wallet
+  // NOTE: Browser wallets cannot deploy directly - must use Polymarket first
   const deployProxy = useCallback(async (): Promise<string | null> => {
     if (!address) return null;
 
@@ -270,36 +290,43 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     try {
       addLog({
         level: "info",
-        message: "Requesting proxy wallet deployment",
+        message: "Checking proxy wallet deployment options",
         source: "trade",
       });
 
-      // Sign message to authorize deployment
-      const message = `Deploy Polymarket Trading Proxy for ${address}`;
-      const signature = await signTypedDataAsync({
-        domain: {
-          name: "Polymarket",
-          version: "1",
-          chainId: polygon.id,
-        },
-        types: {
-          Message: [{ name: "content", type: "string" }],
-        },
-        primaryType: "Message",
-        message: { content: message },
-      });
-
-      // Request deployment
+      // For browser wallets, we can't deploy directly - redirect to Polymarket
+      // This is because deployment requires SDK with private key access
       const response = await fetch("/api/polymarket/proxy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address, signature }),
+        body: JSON.stringify({ address }),
       });
 
       const result = (await response.json()) as ApiResponse<{
-        proxyAddress: string;
-        txHash?: string;
+        proxyAddress?: string;
+        requiresPolymarket?: boolean;
+        polymarketUrl?: string;
+        message?: string;
       }>;
+
+      // Check if user needs to go to Polymarket
+      if (result.data?.requiresPolymarket || result.error?.code === "BROWSER_WALLET_DEPLOYMENT") {
+        const errorMsg = "To trade on Polymarket, you need a Safe wallet. Please visit polymarket.com to set up your account first, then return here to trade.";
+
+        addLog({
+          level: "warn",
+          message: errorMsg,
+          source: "trade",
+          data: { polymarketUrl: "https://polymarket.com" },
+        });
+
+        setTradeState((s) => ({ ...s, error: errorMsg }));
+
+        // Open Polymarket in new tab
+        window.open("https://polymarket.com", "_blank");
+
+        return null;
+      }
 
       if (!result.success) {
         throw new Error(result.error?.message || "Deployment failed");
@@ -316,7 +343,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
 
       addLog({
         level: "success",
-        message: `Proxy wallet deployed: ${proxyAddress}`,
+        message: `Safe wallet deployed: ${proxyAddress}`,
         source: "trade",
         data: result.data,
       });
@@ -328,7 +355,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
 
       addLog({
         level: "error",
-        message: `Proxy deployment failed: ${message}`,
+        message: `Safe deployment failed: ${message}`,
         source: "trade",
       });
 
@@ -336,35 +363,89 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     } finally {
       setTradeState((s) => ({ ...s, isLoading: false }));
     }
-  }, [address, signTypedDataAsync, addLog]);
+  }, [address, addLog]);
 
   // Approve USDC spending
+  // NOTE: For Polymarket, USDC approval must be done THROUGH the Safe wallet to CTF
+  // Browser wallets cannot execute Safe transactions directly - need server-side
+  // or user must approve via Polymarket web app
   const approveUSDC = useCallback(
-    async (amount: number): Promise<boolean> => {
-      if (!proxyStatus?.proxyAddress) return false;
+    async (amount: number, isNegRisk: boolean = false): Promise<boolean> => {
+      if (!proxyStatus?.proxyAddress) {
+        addLog({
+          level: "error",
+          message: "No Safe wallet found. Please set up your account on Polymarket first.",
+          source: "trade",
+        });
+        return false;
+      }
 
       setTradeState((s) => ({ ...s, isApproving: true, error: null }));
 
       try {
+        // Check current allowance
+        const currentAllowance = isNegRisk ? negRiskAllowance : usdcAllowance;
+        const approvalTarget = isNegRisk ? APPROVAL_TARGETS.NEG_RISK : APPROVAL_TARGETS.STANDARD;
+
+        if (currentAllowance >= amount) {
+          addLog({
+            level: "info",
+            message: `USDC already approved (${currentAllowance.toFixed(2)} >= ${amount})`,
+            source: "trade",
+          });
+          return true;
+        }
+
         addLog({
           level: "info",
-          message: `Approving ${amount} USDC for trading`,
+          message: `Requesting USDC approval for ${isNegRisk ? "Neg Risk Adapter" : "CTF"}`,
           source: "trade",
+          data: { amount, target: approvalTarget, currentAllowance },
         });
 
-        const amountWei = parseUnits(amount.toString(), TRADING.USDC_DECIMALS);
-
-        await writeContractAsync({
-          address: CONTRACTS.USDC as Address,
-          abi: USDC_ABI,
-          functionName: "approve",
-          args: [CONTRACTS.POLYMARKET_EXCHANGE as Address, amountWei],
+        // For browser wallets, approval must be done through Safe
+        // This requires server-side execution or Polymarket web app
+        // For now, we call our API to execute the Safe transaction
+        const response = await fetch("/api/polymarket/safe/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ownerAddress: address,
+            proxyAddress: proxyStatus.proxyAddress,
+            transactions: [
+              {
+                type: "approval",
+                tokenAddress: CONTRACTS.USDC,
+                spenderAddress: approvalTarget,
+                amount: "max", // Approve max for convenience
+              },
+            ],
+          }),
         });
+
+        const result = await response.json();
+
+        if (!result.success) {
+          // If server can't execute, guide user to Polymarket
+          if (result.error?.code === "REQUIRES_POLYMARKET") {
+            const errorMsg = "USDC approval must be done through your Safe wallet. Please visit Polymarket to approve USDC for trading.";
+            addLog({
+              level: "warn",
+              message: errorMsg,
+              source: "trade",
+            });
+            setTradeState((s) => ({ ...s, error: errorMsg }));
+            window.open("https://polymarket.com", "_blank");
+            return false;
+          }
+          throw new Error(result.error?.message || "Approval failed");
+        }
 
         addLog({
           level: "success",
           message: "USDC approval successful",
           source: "trade",
+          data: result.data,
         });
 
         return true;
@@ -383,7 +464,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         setTradeState((s) => ({ ...s, isApproving: false }));
       }
     },
-    [proxyStatus?.proxyAddress, writeContractAsync, addLog]
+    [proxyStatus?.proxyAddress, address, usdcAllowance, negRiskAllowance, addLog]
   );
 
   // Execute trade
@@ -436,10 +517,20 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         };
       }
 
-      // Check allowance
-      if (side === "buy" && usdcAllowance < amount) {
-        setTradeState((s) => ({ ...s, error: "Insufficient USDC allowance. Please approve first." }));
-        return { success: false, error: "Insufficient USDC allowance" };
+      // Check allowance - use correct target based on market type
+      const requiredAllowance = market.negRisk ? negRiskAllowance : usdcAllowance;
+      const approvalTarget = market.negRisk ? "Neg Risk Adapter" : "CTF";
+
+      if (side === "buy" && requiredAllowance < amount) {
+        const errorMsg = `Insufficient USDC allowance on ${approvalTarget}. Current: $${requiredAllowance.toFixed(2)}, Need: $${amount.toFixed(2)}. Please approve USDC on Polymarket first.`;
+        setTradeState((s) => ({ ...s, error: errorMsg }));
+        addLog({
+          level: "warn",
+          message: errorMsg,
+          source: "trade",
+          data: { requiredAllowance, amount, approvalTarget },
+        });
+        return { success: false, error: errorMsg };
       }
 
       setTradeState((s) => ({ ...s, isSigning: true }));
@@ -575,7 +666,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         setTradeState((s) => ({ ...s, isSigning: false, isSubmitting: false }));
       }
     },
-    [proxyStatus, usdcBalance, usdcAllowance, address, signTypedDataAsync, addLog]
+    [proxyStatus, usdcBalance, usdcAllowance, negRiskAllowance, address, signTypedDataAsync, addLog]
   );
 
   // Execute Kalshi trade

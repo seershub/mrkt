@@ -18,12 +18,22 @@ export const CONTRACTS = {
   POLYMARKET_EXCHANGE: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
   // Polymarket Neg Risk CTF Exchange (negative risk markets)
   POLYMARKET_NEG_RISK_EXCHANGE: "0xC5d563A36AE78145C45a50134d48A1215220f80a",
-  // Polymarket Conditional Token Framework (CTF)
+  // Polymarket Neg Risk Adapter (for neg risk market approvals)
+  POLYMARKET_NEG_RISK_ADAPTER: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
+  // Conditional Token Framework (CTF) - USDC approval target for standard markets
   CONDITIONAL_TOKENS: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
   // Gnosis Safe Proxy Factory (for MetaMask users)
   SAFE_PROXY_FACTORY: "0xaacfeea03eb1561c4e67d661e40682bd20e3541b",
   // Polymarket Proxy Factory (for MagicLink/email users)
   POLYMARKET_PROXY_FACTORY: "0xaB45c54AB0c941a2F231C04C3f49182e1A254052",
+} as const;
+
+// USDC Approval Targets per Polymarket docs:
+// - Standard markets: Approve USDC to CONDITIONAL_TOKENS
+// - Neg Risk markets: Approve USDC to POLYMARKET_NEG_RISK_ADAPTER
+export const APPROVAL_TARGETS = {
+  STANDARD: CONTRACTS.CONDITIONAL_TOKENS,
+  NEG_RISK: CONTRACTS.POLYMARKET_NEG_RISK_ADAPTER,
 } as const;
 
 // API Endpoints (Per Polymarket docs)
