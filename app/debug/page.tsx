@@ -259,11 +259,11 @@ export default function DebugPage() {
                       {lastApiResponse.status}
                     </Badge>
                   </div>
-                  {lastApiResponse.error && (
+                  {lastApiResponse.error ? (
                     <div className="p-2 bg-red-500/10 rounded text-red-400 text-xs break-all">
                       {JSON.stringify(lastApiResponse.error)}
                     </div>
-                  )}
+                  ) : null}
                 </CardContent>
               </Card>
             )}
