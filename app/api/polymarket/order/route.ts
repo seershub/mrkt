@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { logger } from '@/lib/utils/logger';
 import { ClobClient } from '@polymarket/clob-client';
+import { BuilderConfig } from '@polymarket/builder-signing-sdk';
 import { ethers } from 'ethers';
 
 // Server-side ONLY client for posting orders with Builder Key
@@ -9,17 +10,15 @@ const getBuilderClient = () => {
     const rpcUrl = 'https://polygon-rpc.com';
     const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
 
-    // We need a signer for the builder key? 
-    // The SDK documentation says for `postOrder` with builder attribution, we need to pass the builder config.
-
-    const builderConfig = {
-        apiKey: process.env.POLY_BUILDER_API_KEY || '',
-        secret: process.env.POLY_BUILDER_SECRET || '',
-        passphrase: process.env.POLY_BUILDER_PASSPHRASE || '',
-    };
+    const builderConfig = new BuilderConfig({
+        localBuilderCreds: {
+            key: process.env.POLY_BUILDER_API_KEY || '',
+            secret: process.env.POLY_BUILDER_SECRET || '',
+            passphrase: process.env.POLY_BUILDER_PASSPHRASE || '',
+        }
+    });
 
     // We use a dummy signer because we are only relaying an ALREADY SIGNED order.
-    // The SDK might enforce a signer in constructor.
     const dummyWallet = ethers.Wallet.createRandom().connect(provider);
 
     return new ClobClient(
@@ -31,7 +30,7 @@ const getBuilderClient = () => {
         undefined, // funderAddress
         undefined, // geoBlockToken
         undefined, // useServerTime
-        builderConfig // <--- CRITICAL: Builder Config
+        builderConfig // <--- CRITICAL: Builder Config Instance
     );
 };
 
