@@ -196,27 +196,45 @@ export class PolymarketClient {
     this.dataUrl = DATA_URL;
   }
 
+  // Standard headers for Polymarket APIs (to pass Cloudflare)
+  private getHeaders(): HeadersInit {
+    return {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": "MRKT-Trading-Platform/1.0",
+    };
+  }
+
   // Fetch ALL active events from Gamma API (no category filter)
   // This is the main method for getting markets
   async getAllEvents(limit = 100): Promise<UnifiedMarket[]> {
-    const response = await fetch(
-      `${this.gammaUrl}/events?closed=false&order=id&ascending=false&limit=${limit}`,
-      {
-        headers: {
-          Accept: "application/json",
-        },
+    try {
+      const url = `${this.gammaUrl}/events?closed=false&limit=${limit}`;
+      console.log("[MRKT] Fetching Polymarket events from:", url);
+
+      const response = await fetch(url, {
+        headers: this.getHeaders(),
         next: { revalidate: 60 },
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        console.error("[MRKT] Gamma API error:", response.status, text.substring(0, 200));
+        throw new Error(`Polymarket Gamma API error: ${response.status}`);
       }
-    );
 
-    if (!response.ok) {
-      throw new Error(`Polymarket Gamma API error: ${response.status}`);
+      const events = (await response.json()) as (PolymarketEvent & { negRisk?: boolean })[];
+      console.log("[MRKT] Polymarket events received:", events.length);
+
+      // Transform all events to unified markets (no filtering)
+      const markets = events.flatMap(transformPolymarketEvent);
+      console.log("[MRKT] Polymarket markets transformed:", markets.length);
+
+      return markets;
+    } catch (error) {
+      console.error("[MRKT] getAllEvents error:", error);
+      throw error;
     }
-
-    const events = (await response.json()) as (PolymarketEvent & { negRisk?: boolean })[];
-
-    // Transform all events to unified markets (no filtering)
-    return events.flatMap(transformPolymarketEvent);
   }
 
   // Fetch sports events from Gamma API (filtered)
