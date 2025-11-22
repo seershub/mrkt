@@ -1,34 +1,84 @@
 // ============================================
 // MRKT - Polymarket Order API
-// Server-side signing with Builder Attribution
+// Server-side order submission with Builder Attribution
+// Uses official @polymarket/clob-client SDK
 // ============================================
 
 import { NextRequest, NextResponse } from "next/server";
+import { ClobClient } from "@polymarket/clob-client";
+import { BuilderConfig } from "@polymarket/builder-signing-sdk";
+import { SignedOrder, Side } from "@polymarket/order-utils";
 import { ApiResponse } from "@/types";
 
-export const runtime = "edge";
+// Must use nodejs runtime for SDK (uses ethers.js)
+export const runtime = "nodejs";
+
+// Configuration
+const POLY_CLOB_URL = process.env.POLY_CLOB_URL || "https://clob.polymarket.com";
+const CHAIN_ID = 137; // Polygon Mainnet
 
 // Builder API credentials (server-only)
 const POLY_BUILDER_API_KEY = process.env.POLY_BUILDER_API_KEY;
 const POLY_BUILDER_SECRET = process.env.POLY_BUILDER_SECRET;
 const POLY_BUILDER_PASSPHRASE = process.env.POLY_BUILDER_PASSPHRASE;
-const POLY_CLOB_URL = process.env.POLY_CLOB_URL || "https://clob.polymarket.com";
 
 // Check if builder credentials are configured
-const isBuilderConfigured = Boolean(POLY_BUILDER_API_KEY && POLY_BUILDER_SECRET && POLY_BUILDER_PASSPHRASE);
+const isBuilderConfigured = Boolean(
+  POLY_BUILDER_API_KEY && POLY_BUILDER_SECRET && POLY_BUILDER_PASSPHRASE
+);
 
+// Initialize BuilderConfig for HMAC signing
+function getBuilderConfig(): BuilderConfig | undefined {
+  if (!isBuilderConfigured) return undefined;
+
+  return new BuilderConfig({
+    localBuilderCreds: {
+      key: POLY_BUILDER_API_KEY!,
+      secret: POLY_BUILDER_SECRET!,
+      passphrase: POLY_BUILDER_PASSPHRASE!,
+    },
+  });
+}
+
+// Initialize ClobClient with builder attribution
+function getClobClient(): ClobClient {
+  const builderConfig = getBuilderConfig();
+
+  return new ClobClient(
+    POLY_CLOB_URL,
+    CHAIN_ID,
+    undefined, // No signer needed server-side (client signs)
+    undefined, // No API key creds (using builder mode)
+    undefined, // Default signature type
+    undefined, // No funder address
+    undefined, // No geo block token
+    true, // Use server time
+    builderConfig // Builder config for attribution
+  );
+}
+
+// Request body from client
 interface OrderRequest {
-  // Market details
-  tokenId: string;
-  side: "BUY" | "SELL";
-  size: string; // Amount in shares
-  price: string; // Price per share (0-1)
-  // User signature (EIP-712)
-  userSignature: string;
-  userAddress: string;
-  // Order type
-  orderType: "GTC" | "GTD" | "FOK";
-  expiration?: number;
+  // The signed order from client (EIP-712)
+  signedOrder: {
+    salt: string;
+    maker: string;
+    signer: string;
+    taker: string;
+    tokenId: string;
+    makerAmount: string;
+    takerAmount: string;
+    expiration: string;
+    nonce: string;
+    feeRateBps: string;
+    side: number; // 0 = BUY, 1 = SELL
+    signatureType: number;
+    signature: string;
+  };
+  // Order metadata
+  orderType: "GTC" | "GTD" | "FOK" | "FAK";
+  // Optional: for neg risk markets
+  negRisk?: boolean;
 }
 
 interface OrderResponse {
@@ -47,7 +97,8 @@ export async function POST(request: NextRequest) {
         success: false,
         error: {
           code: "BUILDER_NOT_CONFIGURED",
-          message: "Polymarket Builder API is not configured. Running in demo mode.",
+          message:
+            "Polymarket Builder API is not configured. Running in demo mode.",
         },
         timestamp: new Date().toISOString(),
       };
@@ -58,13 +109,13 @@ export async function POST(request: NextRequest) {
     // Parse request body
     const body = (await request.json()) as OrderRequest;
 
-    // Validate required fields
-    if (!body.tokenId || !body.side || !body.size || !body.price || !body.userSignature || !body.userAddress) {
+    // Validate signed order
+    if (!body.signedOrder || !body.signedOrder.signature) {
       const response: ApiResponse<null> = {
         success: false,
         error: {
           code: "INVALID_REQUEST",
-          message: "Missing required fields: tokenId, side, size, price, userSignature, userAddress",
+          message: "Missing signed order with signature",
         },
         timestamp: new Date().toISOString(),
       };
@@ -72,106 +123,76 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(response, { status: 400 });
     }
 
-    // Validate order parameters
-    const price = parseFloat(body.price);
-    const size = parseFloat(body.size);
+    const { signedOrder, orderType = "GTC" } = body;
 
-    if (price <= 0 || price >= 1) {
-      const response: ApiResponse<null> = {
-        success: false,
-        error: {
-          code: "INVALID_PRICE",
-          message: "Price must be between 0 and 1",
-        },
-        timestamp: new Date().toISOString(),
-      };
+    // Validate required signed order fields
+    const requiredFields = [
+      "salt",
+      "maker",
+      "signer",
+      "tokenId",
+      "makerAmount",
+      "takerAmount",
+      "expiration",
+      "signature",
+    ];
 
-      return NextResponse.json(response, { status: 400 });
+    for (const field of requiredFields) {
+      if (
+        !signedOrder[field as keyof typeof signedOrder] &&
+        signedOrder[field as keyof typeof signedOrder] !== 0
+      ) {
+        const response: ApiResponse<null> = {
+          success: false,
+          error: {
+            code: "INVALID_ORDER",
+            message: `Missing required field: ${field}`,
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return NextResponse.json(response, { status: 400 });
+      }
     }
 
-    if (size <= 0) {
-      const response: ApiResponse<null> = {
-        success: false,
-        error: {
-          code: "INVALID_SIZE",
-          message: "Size must be greater than 0",
-        },
-        timestamp: new Date().toISOString(),
-      };
-
-      return NextResponse.json(response, { status: 400 });
-    }
-
-    // Generate timestamp for API authentication
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-
-    // Create the order payload for Polymarket CLOB
-    const orderPayload = {
-      order: {
-        salt: Math.floor(Math.random() * 1000000000).toString(),
-        maker: body.userAddress,
-        signer: body.userAddress,
-        taker: "0x0000000000000000000000000000000000000000",
-        tokenId: body.tokenId,
-        makerAmount: body.side === "BUY" ? Math.floor(size * price * 1e6).toString() : Math.floor(size * 1e6).toString(),
-        takerAmount: body.side === "BUY" ? Math.floor(size * 1e6).toString() : Math.floor(size * price * 1e6).toString(),
-        expiration: body.expiration || Math.floor(Date.now() / 1000) + 86400, // 24h default
-        nonce: "0",
-        feeRateBps: "0",
-        side: body.side === "BUY" ? 0 : 1,
-        signatureType: 0,
-      },
-      signature: body.userSignature,
-      owner: body.userAddress,
-      orderType: body.orderType || "GTC",
+    // Convert to SDK SignedOrder format
+    const order: SignedOrder = {
+      salt: signedOrder.salt,
+      maker: signedOrder.maker,
+      signer: signedOrder.signer,
+      taker: signedOrder.taker || "0x0000000000000000000000000000000000000000",
+      tokenId: signedOrder.tokenId,
+      makerAmount: signedOrder.makerAmount,
+      takerAmount: signedOrder.takerAmount,
+      expiration: signedOrder.expiration,
+      nonce: signedOrder.nonce || "0",
+      feeRateBps: signedOrder.feeRateBps || "0",
+      side: signedOrder.side as Side,
+      signatureType: signedOrder.signatureType || 0,
+      signature: signedOrder.signature,
     };
 
-    // Create HMAC signature for builder API
-    // Note: In production, you'd use crypto.createHmac with POLY_BUILDER_SECRET
-    const method = "POST";
-    const requestPath = "/order";
-    const bodyString = JSON.stringify(orderPayload);
-
-    // Send to Polymarket CLOB with builder headers
-    const clobResponse = await fetch(`${POLY_CLOB_URL}${requestPath}`, {
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        "POLY-ADDRESS": body.userAddress,
-        "POLY-SIGNATURE": body.userSignature,
-        "POLY-TIMESTAMP": timestamp,
-        "POLY-NONCE": orderPayload.order.salt,
-        // Builder attribution headers
-        "POLY-API-KEY": POLY_BUILDER_API_KEY!,
-        "POLY-PASSPHRASE": POLY_BUILDER_PASSPHRASE!,
-      },
-      body: bodyString,
+    console.log("[MRKT] Submitting order to Polymarket CLOB:", {
+      tokenId: order.tokenId,
+      side: order.side === 0 ? "BUY" : "SELL",
+      maker: order.maker,
+      orderType,
     });
 
-    const clobData = await clobResponse.json();
+    // Get ClobClient with builder attribution
+    const clobClient = getClobClient();
 
-    if (!clobResponse.ok) {
-      console.error("[MRKT] Polymarket CLOB error:", clobData);
+    // Submit order using SDK - this handles HMAC signing automatically
+    const result = await clobClient.postOrder(order, orderType as any);
 
-      const response: ApiResponse<null> = {
-        success: false,
-        error: {
-          code: "CLOB_ERROR",
-          message: clobData.message || `CLOB request failed: ${clobResponse.status}`,
-          details: clobData,
-        },
-        timestamp: new Date().toISOString(),
-      };
-
-      return NextResponse.json(response, { status: clobResponse.status });
-    }
+    console.log("[MRKT] Polymarket order result:", result);
 
     // Success response
     const response: ApiResponse<OrderResponse> = {
       success: true,
       data: {
-        orderId: clobData.orderID || clobData.id,
-        status: clobData.status || "PENDING",
+        orderId: result.orderID || result.id || "submitted",
+        status: result.status || "PENDING",
         message: "Order submitted successfully with builder attribution",
       },
       timestamp: new Date().toISOString(),
@@ -181,11 +202,30 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("[MRKT] Order API error:", error);
 
+    // Extract error message
+    let errorMessage = "Internal server error";
+    let errorCode = "INTERNAL_ERROR";
+
+    if (error instanceof Error) {
+      errorMessage = error.message;
+
+      // Parse common CLOB errors
+      if (errorMessage.includes("insufficient")) {
+        errorCode = "INSUFFICIENT_BALANCE";
+      } else if (errorMessage.includes("price")) {
+        errorCode = "INVALID_PRICE";
+      } else if (errorMessage.includes("size") || errorMessage.includes("amount")) {
+        errorCode = "INVALID_SIZE";
+      } else if (errorMessage.includes("signature")) {
+        errorCode = "INVALID_SIGNATURE";
+      }
+    }
+
     const response: ApiResponse<null> = {
       success: false,
       error: {
-        code: "INTERNAL_ERROR",
-        message: error instanceof Error ? error.message : "Internal server error",
+        code: errorCode,
+        message: errorMessage,
       },
       timestamp: new Date().toISOString(),
     };
@@ -194,16 +234,47 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// GET endpoint to check builder status
+// GET endpoint to check builder status and CLOB health
 export async function GET() {
-  const response: ApiResponse<{ configured: boolean; mockMode: boolean }> = {
-    success: true,
-    data: {
-      configured: isBuilderConfigured,
-      mockMode: !isBuilderConfigured,
-    },
-    timestamp: new Date().toISOString(),
-  };
+  try {
+    if (isBuilderConfigured) {
+      // Try to ping the CLOB
+      const clobClient = getClobClient();
+      await clobClient.getOk();
+    }
 
-  return NextResponse.json(response);
+    const response: ApiResponse<{
+      configured: boolean;
+      mockMode: boolean;
+      clobUrl: string;
+    }> = {
+      success: true,
+      data: {
+        configured: isBuilderConfigured,
+        mockMode: !isBuilderConfigured,
+        clobUrl: POLY_CLOB_URL,
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    return NextResponse.json(response);
+  } catch (error) {
+    const response: ApiResponse<{
+      configured: boolean;
+      mockMode: boolean;
+      clobUrl: string;
+      error?: string;
+    }> = {
+      success: true,
+      data: {
+        configured: isBuilderConfigured,
+        mockMode: !isBuilderConfigured,
+        clobUrl: POLY_CLOB_URL,
+        error: error instanceof Error ? error.message : "CLOB unreachable",
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    return NextResponse.json(response);
+  }
 }

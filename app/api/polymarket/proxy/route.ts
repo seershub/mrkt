@@ -1,69 +1,50 @@
 // ============================================
 // MRKT - Polymarket Proxy Wallet API
 // Check and deploy Gnosis Safe proxy wallets
+// Uses V2 Relayer and @polymarket/builder-relayer-client
 // ============================================
 
 import { NextRequest, NextResponse } from "next/server";
+import { RelayClient } from "@polymarket/builder-relayer-client";
+import { BuilderConfig } from "@polymarket/builder-signing-sdk";
+import { Wallet } from "@ethersproject/wallet";
 import { ApiResponse } from "@/types";
-import { keccak256, encodePacked, getAddress } from "viem";
-import { CONTRACTS } from "@/lib/constants";
 
-export const runtime = "edge";
+// Must use nodejs runtime for SDK (uses ethers.js)
+export const runtime = "nodejs";
 
-const POLY_RELAYER_URL = "https://relayer.polymarket.com";
+// V2 Relayer URL (per official docs)
+const POLY_RELAYER_URL = "https://relayer-v2.polymarket.com";
+const CHAIN_ID = 137; // Polygon Mainnet
 
-// Gnosis Safe constants for computing CREATE2 address
-const SAFE_SINGLETON = "0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552";
+// Builder API credentials (server-only)
+const POLY_BUILDER_API_KEY = process.env.POLY_BUILDER_API_KEY;
+const POLY_BUILDER_SECRET = process.env.POLY_BUILDER_SECRET;
+const POLY_BUILDER_PASSPHRASE = process.env.POLY_BUILDER_PASSPHRASE;
+
+// Check if builder credentials are configured
+const isBuilderConfigured = Boolean(
+  POLY_BUILDER_API_KEY && POLY_BUILDER_SECRET && POLY_BUILDER_PASSPHRASE
+);
+
+// Initialize BuilderConfig for HMAC signing
+function getBuilderConfig(): BuilderConfig | undefined {
+  if (!isBuilderConfigured) return undefined;
+
+  return new BuilderConfig({
+    localBuilderCreds: {
+      key: POLY_BUILDER_API_KEY!,
+      secret: POLY_BUILDER_SECRET!,
+      passphrase: POLY_BUILDER_PASSPHRASE!,
+    },
+  });
+}
 
 interface ProxyStatus {
   hasProxy: boolean;
   proxyAddress?: string;
-  computedAddress?: string; // Always returned so users can fund before deployment
   isDeployed?: boolean;
   allowance?: string;
-}
-
-// Compute the deterministic proxy address using CREATE2
-// This allows users to see their proxy address and fund it before deployment
-function computeProxyAddress(ownerAddress: string): string {
-  try {
-    // Polymarket uses a specific salt based on owner address
-    const salt = keccak256(
-      encodePacked(
-        ["address", "uint256"],
-        [getAddress(ownerAddress), BigInt(0)]
-      )
-    );
-
-    // Simplified proxy init code hash for Gnosis Safe
-    const proxyInitCode = encodePacked(
-      ["bytes", "bytes32"],
-      [
-        "0x608060405234801561001057600080fd5b50" as `0x${string}`,
-        keccak256(encodePacked(["address"], [SAFE_SINGLETON as `0x${string}`])),
-      ]
-    );
-    const initCodeHash = keccak256(proxyInitCode);
-
-    // CREATE2 formula: keccak256(0xff ++ factory ++ salt ++ initCodeHash)
-    const create2Address = keccak256(
-      encodePacked(
-        ["bytes1", "address", "bytes32", "bytes32"],
-        [
-          "0xff",
-          CONTRACTS.SAFE_PROXY_FACTORY as `0x${string}`,
-          salt,
-          initCodeHash,
-        ]
-      )
-    );
-
-    // Extract last 20 bytes as address
-    return getAddress(`0x${create2Address.slice(-40)}`);
-  } catch (error) {
-    console.error("[MRKT] Failed to compute proxy address:", error);
-    return "";
-  }
 }
 
 // GET - Check proxy status for an address
@@ -85,10 +66,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Always compute expected proxy address (useful for pre-funding)
-    const computedAddress = computeProxyAddress(address);
-
-    // Check if user has a proxy wallet on Polymarket
+    // Query V2 relayer for proxy status
     const proxyResponse = await fetch(
       `${POLY_RELAYER_URL}/proxy/${address}`,
       {
@@ -99,12 +77,11 @@ export async function GET(request: NextRequest) {
     );
 
     if (proxyResponse.status === 404) {
-      // No proxy exists yet - return computed address for pre-funding
+      // No proxy exists yet
       const response: ApiResponse<ProxyStatus> = {
         success: true,
         data: {
           hasProxy: false,
-          computedAddress: computedAddress || undefined,
           isDeployed: false,
         },
         timestamp: new Date().toISOString(),
@@ -118,14 +95,13 @@ export async function GET(request: NextRequest) {
     }
 
     const proxyData = await proxyResponse.json();
-    const actualProxyAddress = proxyData.proxy || proxyData.address;
+    const proxyAddress = proxyData.proxy || proxyData.address || proxyData.safeAddress;
 
     const response: ApiResponse<ProxyStatus> = {
       success: true,
       data: {
         hasProxy: true,
-        proxyAddress: actualProxyAddress,
-        computedAddress: computedAddress || actualProxyAddress,
+        proxyAddress,
         isDeployed: proxyData.deployed !== false,
         allowance: proxyData.allowance,
       },
@@ -149,61 +125,141 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// POST - Deploy a new proxy wallet
+// POST - Deploy a new proxy wallet using RelayClient
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { address, signature } = body;
+    // Check builder configuration for gasless deployment
+    if (!isBuilderConfigured) {
+      console.warn("[MRKT] Builder credentials not configured for proxy deployment");
 
-    if (!address || !signature) {
       const response: ApiResponse<null> = {
         success: false,
         error: {
-          code: "INVALID_REQUEST",
-          message: "Address and signature are required",
+          code: "BUILDER_NOT_CONFIGURED",
+          message: "Builder API is required for proxy deployment",
         },
         timestamp: new Date().toISOString(),
       };
 
-      return NextResponse.json(response, { status: 400 });
+      return NextResponse.json(response, { status: 503 });
     }
 
-    // Request proxy deployment from Polymarket relayer
-    const deployResponse = await fetch(
-      `${POLY_RELAYER_URL}/proxy`,
-      {
-        method: "POST",
+    const body = await request.json();
+    const { privateKey } = body;
+
+    // For server-side deployment, we need the user's private key or a signed message
+    // In production, you'd use the user's wallet signature to authorize deployment
+    if (!privateKey) {
+      // Fallback to direct relayer API call with signature
+      const { address, signature } = body;
+
+      if (!address || !signature) {
+        const response: ApiResponse<null> = {
+          success: false,
+          error: {
+            code: "INVALID_REQUEST",
+            message: "Either privateKey or (address + signature) is required",
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return NextResponse.json(response, { status: 400 });
+      }
+
+      // Use direct API call with builder headers
+      const builderConfig = getBuilderConfig();
+      const timestamp = Date.now();
+      const method = "POST";
+      const path = "/proxy";
+
+      // Generate builder headers
+      const builderHeaders = await builderConfig?.generateBuilderHeaders(
+        method,
+        path,
+        JSON.stringify({ owner: address }),
+        timestamp
+      );
+
+      const deployResponse = await fetch(`${POLY_RELAYER_URL}${path}`, {
+        method,
         headers: {
           "Content-Type": "application/json",
+          ...(builderHeaders || {}),
         },
         body: JSON.stringify({
           owner: address,
-          signature: signature,
+          signature,
         }),
+      });
+
+      const deployData = await deployResponse.json();
+
+      if (!deployResponse.ok) {
+        const response: ApiResponse<null> = {
+          success: false,
+          error: {
+            code: "PROXY_DEPLOY_FAILED",
+            message: deployData.message || `Deployment failed: ${deployResponse.status}`,
+            details: deployData,
+          },
+          timestamp: new Date().toISOString(),
+        };
+
+        return NextResponse.json(response, { status: deployResponse.status });
       }
-    );
 
-    const deployData = await deployResponse.json();
-
-    if (!deployResponse.ok) {
-      const response: ApiResponse<null> = {
-        success: false,
-        error: {
-          code: "PROXY_DEPLOY_FAILED",
-          message: deployData.message || `Deployment failed: ${deployResponse.status}`,
-          details: deployData,
+      const response: ApiResponse<{ proxyAddress: string; txHash?: string; transactionId?: string }> = {
+        success: true,
+        data: {
+          proxyAddress: deployData.proxy || deployData.address || deployData.safeAddress,
+          txHash: deployData.txHash,
+          transactionId: deployData.transactionId,
         },
         timestamp: new Date().toISOString(),
       };
 
-      return NextResponse.json(response, { status: deployResponse.status });
+      return NextResponse.json(response);
     }
 
-    const response: ApiResponse<{ proxyAddress: string; txHash?: string }> = {
+    // If private key provided, use RelayClient SDK for full deployment
+    const wallet = new Wallet(privateKey);
+    const builderConfig = getBuilderConfig();
+
+    const relayClient = new RelayClient(
+      POLY_RELAYER_URL,
+      CHAIN_ID,
+      wallet,
+      builderConfig
+    );
+
+    console.log("[MRKT] Deploying proxy wallet via RelayClient...");
+
+    // Deploy safe using SDK
+    const deployResult = await relayClient.deploy();
+
+    console.log("[MRKT] Proxy deployment result:", deployResult);
+
+    // Poll for completion if needed
+    if (deployResult.transactionId) {
+      const finalResult = await relayClient.pollUntilState(
+        deployResult.transactionId,
+        ["CONFIRMED", "COMPLETED"],
+        "FAILED",
+        30, // Max polls
+        2000 // Poll frequency (2s)
+      );
+
+      if (!finalResult) {
+        throw new Error("Proxy deployment timed out or failed");
+      }
+    }
+
+    const response: ApiResponse<{ proxyAddress: string; txHash?: string; transactionId?: string }> = {
       success: true,
       data: {
-        proxyAddress: deployData.proxy || deployData.address,
-        txHash: deployData.txHash,
+        proxyAddress: deployResult.safeAddress || deployResult.address,
+        txHash: deployResult.txHash,
+        transactionId: deployResult.transactionId,
       },
       timestamp: new Date().toISOString(),
     };

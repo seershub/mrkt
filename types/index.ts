@@ -59,6 +59,12 @@ export interface UnifiedMarket {
   tags: string[];
   // Original API response for debugging
   rawData?: unknown;
+  // Polymarket specific: negative risk market flag
+  negRisk?: boolean;
+  // Minimum order size in USD
+  minOrderSize?: number;
+  // Condition ID (Polymarket)
+  conditionId?: string;
 }
 
 export interface MarketOutcome {

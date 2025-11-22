@@ -486,19 +486,31 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
           source: "trade",
         });
 
-        // Submit to our API (which forwards to Polymarket with builder attribution)
+        // Build the signed order object matching SDK format
+        const signedOrder = {
+          salt: salt.toString(),
+          maker: proxyStatus.proxyAddress!,
+          signer: address,
+          taker: "0x0000000000000000000000000000000000000000",
+          tokenId: tokenId,
+          makerAmount: (side === "buy" ? costWei : sharesWei).toString(),
+          takerAmount: (side === "buy" ? sharesWei : costWei).toString(),
+          expiration: expiration.toString(),
+          nonce: "0",
+          feeRateBps: "0",
+          side: side === "buy" ? 0 : 1,
+          signatureType: 0,
+          signature: signature,
+        };
+
+        // Submit to our API (which forwards to Polymarket with builder attribution via SDK)
         const response = await fetch("/api/polymarket/order", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            tokenId,
-            side: side.toUpperCase(),
-            size: shares.toString(),
-            price: price.toString(),
-            userSignature: signature,
-            userAddress: address,
+            signedOrder,
             orderType: "GTC",
-            expiration,
+            negRisk: market.negRisk || false,
           }),
         });
 
