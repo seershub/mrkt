@@ -6,10 +6,11 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { useAccount, useSignTypedData, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
-import { parseUnits, formatUnits, Address, Hex } from "viem";
+import { useAccount, useSignTypedData, useReadContract, useWalletClient } from "wagmi";
+import { parseUnits, formatUnits, Address } from "viem";
 import { polygon } from "viem/chains";
-import { CONTRACTS, TRADING, API_ENDPOINTS, APPROVAL_TARGETS } from "@/lib/constants";
+import { CONTRACTS, TRADING, APPROVAL_TARGETS } from "@/lib/constants";
+import { usePolymarketSafe } from "./usePolymarketSafe";
 
 // Polymarket Signature Types per docs
 // https://docs.polymarket.com/developers/clob-api/authentication
@@ -151,19 +152,26 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
 
   // Wagmi hooks
   const { signTypedDataAsync } = useSignTypedData();
-  const { writeContractAsync, data: approvalTxHash } = useWriteContract();
-  const { isLoading: isApprovalPending } = useWaitForTransactionReceipt({
-    hash: approvalTxHash,
-  });
+  const { data: walletClient } = useWalletClient();
 
-  // Read USDC balance for the proxy wallet
+  // Use Polymarket Safe hook for Safe operations
+  const {
+    safeStatus,
+    isDeploying,
+    isApproving: isSafeApproving,
+    deploySafe,
+    approveUSDC: approveSafeUSDC,
+    checkSafeStatus,
+  } = usePolymarketSafe();
+
+  // Read USDC balance for the Safe wallet
   const { data: proxyUsdcBalanceRaw } = useReadContract({
     address: CONTRACTS.USDC as Address,
     abi: USDC_ABI,
     functionName: "balanceOf",
-    args: proxyStatus?.proxyAddress ? [proxyStatus.proxyAddress as Address] : undefined,
+    args: safeStatus.proxyAddress ? [safeStatus.proxyAddress as Address] : undefined,
     query: {
-      enabled: !!proxyStatus?.proxyAddress,
+      enabled: !!safeStatus.proxyAddress,
       refetchInterval: 10000,
     },
   });
@@ -174,11 +182,11 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     address: CONTRACTS.USDC as Address,
     abi: USDC_ABI,
     functionName: "allowance",
-    args: proxyStatus?.proxyAddress
-      ? [proxyStatus.proxyAddress as Address, APPROVAL_TARGETS.STANDARD as Address]
+    args: safeStatus.proxyAddress
+      ? [safeStatus.proxyAddress as Address, APPROVAL_TARGETS.STANDARD as Address]
       : undefined,
     query: {
-      enabled: !!proxyStatus?.proxyAddress,
+      enabled: !!safeStatus.proxyAddress,
       refetchInterval: 10000,
     },
   });
@@ -188,11 +196,11 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     address: CONTRACTS.USDC as Address,
     abi: USDC_ABI,
     functionName: "allowance",
-    args: proxyStatus?.proxyAddress
-      ? [proxyStatus.proxyAddress as Address, APPROVAL_TARGETS.NEG_RISK as Address]
+    args: safeStatus.proxyAddress
+      ? [safeStatus.proxyAddress as Address, APPROVAL_TARGETS.NEG_RISK as Address]
       : undefined,
     query: {
-      enabled: !!proxyStatus?.proxyAddress,
+      enabled: !!safeStatus.proxyAddress,
       refetchInterval: 10000,
     },
   });
@@ -210,78 +218,63 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     ? parseFloat(formatUnits(negRiskAllowanceRaw as bigint, TRADING.USDC_DECIMALS))
     : 0;
 
+  // Sync proxyStatus with safeStatus for backwards compatibility
+  useEffect(() => {
+    if (safeStatus.isDeployed && safeStatus.proxyAddress) {
+      setProxyStatus({
+        hasProxy: true,
+        proxyAddress: safeStatus.proxyAddress,
+        isDeployed: true,
+        needsDeployment: false,
+      });
+    } else if (!safeStatus.isLoading) {
+      setProxyStatus({
+        hasProxy: false,
+        proxyAddress: undefined,
+        isDeployed: false,
+        needsDeployment: true,
+      });
+    }
+  }, [safeStatus]);
+
   // Update debug store with balance
   useEffect(() => {
-    if (proxyStatus?.proxyAddress) {
+    if (safeStatus.proxyAddress) {
       setWalletState({
-        polymarketProxy: proxyStatus.proxyAddress,
+        polymarketProxy: safeStatus.proxyAddress,
         usdcBalance,
       });
     }
-  }, [proxyStatus?.proxyAddress, usdcBalance, setWalletState]);
+  }, [safeStatus.proxyAddress, usdcBalance, setWalletState]);
 
-  // Check proxy status
+  // Check proxy/Safe status - uses usePolymarketSafe hook
   const checkProxyStatus = useCallback(async (): Promise<ProxyStatus | null> => {
     if (!address) return null;
 
     setTradeState((s) => ({ ...s, isCheckingProxy: true, error: null }));
 
     try {
-      addLog({
-        level: "info",
-        message: "Checking Polymarket proxy status",
-        source: "trade",
-        data: { address },
-      });
-
-      const response = await fetch(`/api/polymarket/proxy?address=${address}`);
-      const result = (await response.json()) as ApiResponse<{
-        hasProxy: boolean;
-        proxyAddress?: string;
-        isDeployed?: boolean;
-      }>;
-
-      if (!result.success) {
-        throw new Error(result.error?.message || "Failed to check proxy status");
-      }
+      const isDeployed = await checkSafeStatus();
 
       const status: ProxyStatus = {
-        hasProxy: result.data?.hasProxy ?? false,
-        proxyAddress: result.data?.proxyAddress,
-        isDeployed: result.data?.isDeployed,
-        needsDeployment: !result.data?.hasProxy || !result.data?.isDeployed,
+        hasProxy: isDeployed,
+        proxyAddress: safeStatus.proxyAddress,
+        isDeployed: isDeployed,
+        needsDeployment: !isDeployed,
       };
 
       setProxyStatus(status);
-
-      addLog({
-        level: status.needsDeployment ? "warn" : "success",
-        message: status.needsDeployment
-          ? "Proxy wallet not deployed - trading on Polymarket requires deployment"
-          : `Proxy wallet found: ${status.proxyAddress}`,
-        source: "trade",
-        data: status,
-      });
-
       return status;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Proxy check failed";
+      const message = error instanceof Error ? error.message : "Status check failed";
       setTradeState((s) => ({ ...s, error: message }));
-
-      addLog({
-        level: "error",
-        message: `Proxy check failed: ${message}`,
-        source: "trade",
-      });
-
       return null;
     } finally {
       setTradeState((s) => ({ ...s, isCheckingProxy: false }));
     }
-  }, [address, addLog]);
+  }, [address, checkSafeStatus, safeStatus.proxyAddress]);
 
-  // Deploy proxy wallet
-  // NOTE: Browser wallets cannot deploy directly - must use Polymarket first
+  // Deploy Safe wallet - gasless via Relayer (no redirect to Polymarket!)
   const deployProxy = useCallback(async (): Promise<string | null> => {
     if (!address) return null;
 
@@ -290,65 +283,36 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     try {
       addLog({
         level: "info",
-        message: "Checking proxy wallet deployment options",
+        message: "Deploying Safe wallet for trading...",
         source: "trade",
       });
 
-      // For browser wallets, we can't deploy directly - redirect to Polymarket
-      // This is because deployment requires SDK with private key access
-      const response = await fetch("/api/polymarket/proxy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address }),
-      });
+      // Use the Safe hook to deploy - this handles signing and relayer submission
+      const proxyAddress = await deploySafe();
 
-      const result = (await response.json()) as ApiResponse<{
-        proxyAddress?: string;
-        requiresPolymarket?: boolean;
-        polymarketUrl?: string;
-        message?: string;
-      }>;
-
-      // Check if user needs to go to Polymarket
-      if (result.data?.requiresPolymarket || result.error?.code === "BROWSER_WALLET_DEPLOYMENT") {
-        const errorMsg = "To trade on Polymarket, you need a Safe wallet. Please visit polymarket.com to set up your account first, then return here to trade.";
-
-        addLog({
-          level: "warn",
-          message: errorMsg,
-          source: "trade",
-          data: { polymarketUrl: "https://polymarket.com" },
+      if (proxyAddress) {
+        setProxyStatus({
+          hasProxy: true,
+          proxyAddress,
+          isDeployed: true,
+          needsDeployment: false,
         });
 
-        setTradeState((s) => ({ ...s, error: errorMsg }));
+        addLog({
+          level: "success",
+          message: `Safe wallet deployed: ${proxyAddress}`,
+          source: "trade",
+        });
 
-        // Open Polymarket in new tab
-        window.open("https://polymarket.com", "_blank");
-
-        return null;
+        return proxyAddress;
       }
 
-      if (!result.success) {
-        throw new Error(result.error?.message || "Deployment failed");
+      // Check if there was an error from the Safe hook
+      if (safeStatus.error) {
+        throw new Error(safeStatus.error);
       }
 
-      const proxyAddress = result.data?.proxyAddress;
-
-      setProxyStatus({
-        hasProxy: true,
-        proxyAddress,
-        isDeployed: true,
-        needsDeployment: false,
-      });
-
-      addLog({
-        level: "success",
-        message: `Safe wallet deployed: ${proxyAddress}`,
-        source: "trade",
-        data: result.data,
-      });
-
-      return proxyAddress ?? null;
+      return null;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Deployment failed";
       setTradeState((s) => ({ ...s, error: message }));
@@ -363,18 +327,15 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     } finally {
       setTradeState((s) => ({ ...s, isLoading: false }));
     }
-  }, [address, addLog]);
+  }, [address, deploySafe, safeStatus.error, addLog]);
 
-  // Approve USDC spending
-  // NOTE: For Polymarket, USDC approval must be done THROUGH the Safe wallet to CTF
-  // Browser wallets cannot execute Safe transactions directly - need server-side
-  // or user must approve via Polymarket web app
+  // Approve USDC spending - gasless via Relayer (no redirect to Polymarket!)
   const approveUSDC = useCallback(
     async (amount: number, isNegRisk: boolean = false): Promise<boolean> => {
-      if (!proxyStatus?.proxyAddress) {
+      if (!safeStatus.proxyAddress) {
         addLog({
           level: "error",
-          message: "No Safe wallet found. Please set up your account on Polymarket first.",
+          message: "No Safe wallet found. Please deploy your Safe first.",
           source: "trade",
         });
         return false;
@@ -385,12 +346,12 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
       try {
         // Check current allowance
         const currentAllowance = isNegRisk ? negRiskAllowance : usdcAllowance;
-        const approvalTarget = isNegRisk ? APPROVAL_TARGETS.NEG_RISK : APPROVAL_TARGETS.STANDARD;
+        const targetName = isNegRisk ? "Neg Risk Adapter" : "CTF";
 
         if (currentAllowance >= amount) {
           addLog({
             level: "info",
-            message: `USDC already approved (${currentAllowance.toFixed(2)} >= ${amount})`,
+            message: `USDC already approved for ${targetName} (${currentAllowance.toFixed(2)} >= ${amount})`,
             source: "trade",
           });
           return true;
@@ -398,57 +359,23 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
 
         addLog({
           level: "info",
-          message: `Requesting USDC approval for ${isNegRisk ? "Neg Risk Adapter" : "CTF"}`,
+          message: `Approving USDC for ${targetName}...`,
           source: "trade",
-          data: { amount, target: approvalTarget, currentAllowance },
+          data: { amount, isNegRisk, currentAllowance },
         });
 
-        // For browser wallets, approval must be done through Safe
-        // This requires server-side execution or Polymarket web app
-        // For now, we call our API to execute the Safe transaction
-        const response = await fetch("/api/polymarket/safe/execute", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ownerAddress: address,
-            proxyAddress: proxyStatus.proxyAddress,
-            transactions: [
-              {
-                type: "approval",
-                tokenAddress: CONTRACTS.USDC,
-                spenderAddress: approvalTarget,
-                amount: "max", // Approve max for convenience
-              },
-            ],
-          }),
-        });
+        // Use the Safe hook for gasless approval
+        const success = await approveSafeUSDC(isNegRisk);
 
-        const result = await response.json();
-
-        if (!result.success) {
-          // If server can't execute, guide user to Polymarket
-          if (result.error?.code === "REQUIRES_POLYMARKET") {
-            const errorMsg = "USDC approval must be done through your Safe wallet. Please visit Polymarket to approve USDC for trading.";
-            addLog({
-              level: "warn",
-              message: errorMsg,
-              source: "trade",
-            });
-            setTradeState((s) => ({ ...s, error: errorMsg }));
-            window.open("https://polymarket.com", "_blank");
-            return false;
-          }
-          throw new Error(result.error?.message || "Approval failed");
+        if (success) {
+          addLog({
+            level: "success",
+            message: `USDC approved for ${targetName}!`,
+            source: "trade",
+          });
         }
 
-        addLog({
-          level: "success",
-          message: "USDC approval successful",
-          source: "trade",
-          data: result.data,
-        });
-
-        return true;
+        return success;
       } catch (error) {
         const message = error instanceof Error ? error.message : "Approval failed";
         setTradeState((s) => ({ ...s, error: message }));
@@ -464,7 +391,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         setTradeState((s) => ({ ...s, isApproving: false }));
       }
     },
-    [proxyStatus?.proxyAddress, address, usdcAllowance, negRiskAllowance, addLog]
+    [safeStatus.proxyAddress, usdcAllowance, negRiskAllowance, approveSafeUSDC, addLog]
   );
 
   // Execute trade
@@ -504,9 +431,9 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     async (params: TradeParams): Promise<TradeResult> => {
       const { market, outcome, amount, side } = params;
 
-      // Ensure proxy is ready
-      if (!proxyStatus || proxyStatus.needsDeployment) {
-        return { success: false, error: "Proxy wallet not deployed. Please deploy first." };
+      // Ensure Safe is ready
+      if (!safeStatus.isDeployed || !safeStatus.proxyAddress) {
+        return { success: false, error: "Safe wallet not deployed. Please enable trading first." };
       }
 
       // Check balance
@@ -564,7 +491,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
 
         const orderMessage = {
           salt: BigInt(salt),
-          maker: proxyStatus.proxyAddress! as Address,
+          maker: safeStatus.proxyAddress as Address,
           signer: address as Address,
           taker: "0x0000000000000000000000000000000000000000" as Address,
           tokenId: BigInt(tokenId),
@@ -607,7 +534,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         // Per docs: signatureType must match wallet type
         const signedOrder = {
           salt: salt.toString(),
-          maker: proxyStatus.proxyAddress!,
+          maker: safeStatus.proxyAddress!,
           signer: address,
           taker: "0x0000000000000000000000000000000000000000",
           tokenId: tokenId,
@@ -666,7 +593,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         setTradeState((s) => ({ ...s, isSigning: false, isSubmitting: false }));
       }
     },
-    [proxyStatus, usdcBalance, usdcAllowance, negRiskAllowance, address, signTypedDataAsync, addLog]
+    [safeStatus, usdcBalance, usdcAllowance, negRiskAllowance, address, signTypedDataAsync, addLog]
   );
 
   // Execute Kalshi trade
@@ -763,13 +690,12 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     }
   }, []);
 
-  // Initial proxy check and Kalshi balance fetch
+  // Initial Kalshi balance fetch (Safe status is handled by usePolymarketSafe hook)
   useEffect(() => {
     if (isConnected && address) {
-      checkProxyStatus();
       fetchKalshiBalance();
     }
-  }, [isConnected, address, checkProxyStatus, fetchKalshiBalance]);
+  }, [isConnected, address, fetchKalshiBalance]);
 
   // Reset state
   const resetState = useCallback(() => {
