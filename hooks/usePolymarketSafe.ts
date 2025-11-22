@@ -6,7 +6,7 @@
 
 "use client";
 
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useAccount, useWalletClient } from "wagmi";
 import {
   RelayClient,
@@ -30,13 +30,11 @@ const CHAIN_ID = 137;
 
 // Remote builder signing server URL
 // Per SDK docs: BuilderConfig.remoteBuilderConfig.url
-// Uses external signing server (recommended) or fallback to local API
-const getBuilderSigningUrl = () => {
+const getBuilderSigningUrl = (): string => {
   // Priority 1: Use external builder signing server if configured
   const externalServer = process.env.NEXT_PUBLIC_BUILDER_SIGNING_SERVER_URL;
   if (externalServer) {
-    // Per Polymarket docs: signing server uses /sign endpoint
-    const baseUrl = externalServer.replace(/\/$/, ""); // Remove trailing slash
+    const baseUrl = externalServer.replace(/\/$/, "");
     return `${baseUrl}/sign`;
   }
 
@@ -45,7 +43,6 @@ const getBuilderSigningUrl = () => {
     return `${window.location.origin}/api/polymarket/builder-sign`;
   }
 
-  // Fallback for SSR
   return "https://mrkt.seershub.com/api/polymarket/builder-sign";
 };
 
@@ -76,8 +73,7 @@ interface UsePolymarketSafeReturn {
 
 export function usePolymarketSafe(): UsePolymarketSafeReturn {
   const { address, isConnected, chain } = useAccount();
-  // Get walletClient without chainId filter - we'll handle chain switching
-  const { data: walletClient, isLoading: isWalletLoading } = useWalletClient();
+  const { data: walletClient } = useWalletClient();
   const addLog = useDebugStore((s) => s.addLog);
 
   // State
@@ -89,36 +85,37 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
   });
   const [isDeploying, setIsDeploying] = useState(false);
   const [isApproving, setIsApproving] = useState(false);
-  const [relayClientError, setRelayClientError] = useState<string | null>(null);
+
+  // RelayClient ref - use ref to avoid re-renders
+  const relayClientRef = useRef<RelayClient | null>(null);
+  const [isClientReady, setIsClientReady] = useState(false);
 
   // Check if on correct chain
   const isOnPolygon = chain?.id === CHAIN_ID;
 
   // ============================================
-  // Initialize RelayClient
-  // Per SDK: RelayClient(relayerUrl, chainId, signer, builderConfig)
-  // SDK accepts WalletClient directly via createAbstractSigner
+  // Initialize RelayClient with useEffect (not useMemo!)
   // ============================================
-  const relayClient = useMemo(() => {
-    // Clear previous error
-    setRelayClientError(null);
+  useEffect(() => {
+    // Reset client state
+    relayClientRef.current = null;
+    setIsClientReady(false);
 
     if (!walletClient) {
-      console.log("[MRKT] RelayClient: walletClient not available yet");
-      return null;
+      console.log("[MRKT] RelayClient: Waiting for walletClient...");
+      return;
     }
 
     if (!isOnPolygon) {
-      console.log("[MRKT] RelayClient: Not on Polygon chain, current chain:", chain?.id);
-      setRelayClientError(`Please switch to Polygon network (current: ${chain?.name || 'Unknown'})`);
-      return null;
+      console.log("[MRKT] RelayClient: Wrong chain. Current:", chain?.id, chain?.name);
+      console.log("[MRKT] RelayClient: Please switch to Polygon (137)");
+      return;
     }
 
     try {
-      // Per SDK docs: Use remoteBuilderConfig for HMAC signing
       const builderSigningUrl = getBuilderSigningUrl();
+      console.log("[MRKT] ========== RelayClient Init ==========");
       console.log("[MRKT] Builder signing URL:", builderSigningUrl);
-      console.log("[MRKT] WalletClient available:", !!walletClient);
       console.log("[MRKT] WalletClient account:", walletClient.account?.address);
       console.log("[MRKT] WalletClient chain:", walletClient.chain?.id);
 
@@ -127,10 +124,8 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
           url: builderSigningUrl,
         },
       });
+      console.log("[MRKT] BuilderConfig created");
 
-      console.log("[MRKT] BuilderConfig created successfully");
-
-      // Per SDK: RelayClient accepts viem WalletClient directly
       const client = new RelayClient(
         POLY_RELAYER_URL,
         CHAIN_ID,
@@ -138,26 +133,30 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
         builderConfig
       );
 
-      console.log("[MRKT] RelayClient initialized successfully with remote signing");
-      return client;
+      relayClientRef.current = client;
+      setIsClientReady(true);
+      console.log("[MRKT] RelayClient READY!");
+      console.log("[MRKT] =====================================");
+
+      addLog({
+        level: "success",
+        message: "RelayClient initialized successfully",
+        source: "safe",
+      });
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      console.error("[MRKT] Failed to initialize RelayClient:", errorMsg, error);
-      setRelayClientError(errorMsg);
+      console.error("[MRKT] RelayClient init FAILED:", errorMsg, error);
 
       addLog({
         level: "error",
         message: `RelayClient init failed: ${errorMsg}`,
         source: "safe",
       });
-
-      return null;
     }
   }, [walletClient, isOnPolygon, chain, addLog]);
 
   // ============================================
   // Check Safe Deployment Status
-  // Per SDK: GET /deployed?address=<address>
   // ============================================
   const checkSafeStatus = useCallback(async (): Promise<boolean> => {
     if (!address) return false;
@@ -165,13 +164,8 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     setSafeStatus((s) => ({ ...s, isLoading: true, error: null }));
 
     try {
-      addLog({
-        level: "info",
-        message: "Checking Safe wallet status...",
-        source: "safe",
-      });
+      console.log("[MRKT] Checking Safe at:", `${POLY_RELAYER_URL}/deployed?address=${address}`);
 
-      // Per SDK: /deployed endpoint returns { deployed: boolean }
       const response = await fetch(
         `${POLY_RELAYER_URL}/deployed?address=${address}`,
         {
@@ -187,13 +181,12 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
       }
 
       const data = await response.json();
+      console.log("[MRKT] Safe status response:", data);
       const isDeployed = data.deployed === true;
 
-      // If deployed, get proxy address from nonce endpoint
       let proxyAddress: string | undefined;
       if (isDeployed) {
         try {
-          // Per SDK: /nonce?address=<address>&signerType=EOA
           const nonceResponse = await fetch(
             `${POLY_RELAYER_URL}/nonce?address=${address}&signerType=EOA`,
             { headers: { Accept: "application/json" } }
@@ -216,17 +209,13 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
 
       addLog({
         level: isDeployed ? "success" : "info",
-        message: isDeployed
-          ? `Safe wallet found: ${proxyAddress}`
-          : "No Safe wallet deployed yet",
+        message: isDeployed ? `Safe found: ${proxyAddress}` : "No Safe deployed yet",
         source: "safe",
-        data: { isDeployed, proxyAddress },
       });
 
       return isDeployed;
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Failed to check Safe status";
+      const message = error instanceof Error ? error.message : "Failed to check Safe status";
       setSafeStatus({
         isDeployed: false,
         proxyAddress: undefined,
@@ -236,7 +225,7 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
 
       addLog({
         level: "error",
-        message: `Safe status check failed: ${message}`,
+        message: `Safe check failed: ${message}`,
         source: "safe",
       });
 
@@ -246,35 +235,33 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
 
   // ============================================
   // Deploy Safe Wallet
-  // Per SDK: relayClient.deploy()
-  // Returns RelayerTransactionResponse with wait() method
   // ============================================
   const deploySafe = useCallback(async (): Promise<string | null> => {
+    console.log("[MRKT] ========== Deploy Safe ==========");
+    console.log("[MRKT] address:", address);
+    console.log("[MRKT] isOnPolygon:", isOnPolygon);
+    console.log("[MRKT] chain:", chain?.id, chain?.name);
+    console.log("[MRKT] isClientReady:", isClientReady);
+    console.log("[MRKT] relayClientRef.current:", !!relayClientRef.current);
+
     if (!address) {
-      addLog({
-        level: "error",
-        message: "Wallet not connected. Please connect your wallet first.",
-        source: "safe",
-      });
+      const msg = "Wallet not connected";
+      console.error("[MRKT]", msg);
+      addLog({ level: "error", message: msg, source: "safe" });
       return null;
     }
 
     if (!isOnPolygon) {
-      addLog({
-        level: "error",
-        message: `Please switch to Polygon network. Current: ${chain?.name || 'Unknown'}`,
-        source: "safe",
-      });
+      const msg = `Please switch to Polygon. Current: ${chain?.name || chain?.id || 'Unknown'}`;
+      console.error("[MRKT]", msg);
+      addLog({ level: "error", message: msg, source: "safe" });
       return null;
     }
 
-    if (!relayClient) {
-      const errorMsg = relayClientError || "RelayClient not initialized. Please refresh the page.";
-      addLog({
-        level: "error",
-        message: errorMsg,
-        source: "safe",
-      });
+    if (!isClientReady || !relayClientRef.current) {
+      const msg = "RelayClient not ready. Please wait or refresh the page.";
+      console.error("[MRKT]", msg);
+      addLog({ level: "error", message: msg, source: "safe" });
       return null;
     }
 
@@ -282,44 +269,38 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     setSafeStatus((s) => ({ ...s, error: null }));
 
     try {
+      console.log("[MRKT] Calling relayClient.deploy()...");
       addLog({
         level: "info",
-        message: "Deploying Safe wallet via Relayer...",
+        message: "Deploying Safe wallet... Please sign in MetaMask",
         source: "safe",
       });
 
-      // Per SDK: deploy() returns RelayerTransactionResponse
-      // SDK handles: Safe factory params, user signature, relayer submission
-      // Relayer pays gas (gasless for user)
-      const response = await relayClient.deploy();
+      // This should trigger MetaMask signature request
+      const response = await relayClientRef.current.deploy();
+      console.log("[MRKT] Deploy response:", response);
 
       addLog({
         level: "info",
-        message: "Deployment submitted, waiting for confirmation...",
+        message: `Deployment submitted: ${response.transactionID}`,
         source: "safe",
-        data: { transactionId: response.transactionID },
       });
 
-      // Per SDK: wait() returns RelayerTransaction or undefined
       let transaction = await response.wait();
 
-      // Per SDK: pollUntilState as fallback
       if (!transaction && response.transactionID) {
-        transaction = await relayClient.pollUntilState(
+        console.log("[MRKT] Polling for transaction state...");
+        transaction = await relayClientRef.current.pollUntilState(
           response.transactionID,
           [RelayerTransactionState.STATE_CONFIRMED, RelayerTransactionState.STATE_MINED],
           RelayerTransactionState.STATE_FAILED,
-          30, // max polls
-          2000 // poll interval (ms)
+          30,
+          2000
         );
-
-        if (!transaction) {
-          throw new Error("Safe deployment timed out or failed");
-        }
       }
 
-      // Get proxy address from transaction
       const proxyAddress = transaction?.proxyAddress;
+      console.log("[MRKT] Deploy complete. Proxy:", proxyAddress);
 
       if (proxyAddress) {
         setSafeStatus({
@@ -331,59 +312,47 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
 
         addLog({
           level: "success",
-          message: `Safe wallet deployed: ${proxyAddress}`,
+          message: `Safe deployed: ${proxyAddress}`,
           source: "safe",
-          data: { proxyAddress, txHash: transaction?.transactionHash },
         });
 
         return proxyAddress;
       }
 
-      // Fallback: recheck status to get proxy address
       await checkSafeStatus();
       return safeStatus.proxyAddress || null;
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Safe deployment failed";
+      const message = error instanceof Error ? error.message : "Deployment failed";
+      console.error("[MRKT] Deploy error:", message, error);
       setSafeStatus((s) => ({ ...s, error: message }));
 
       addLog({
         level: "error",
-        message: `Safe deployment failed: ${message}`,
+        message: `Deploy failed: ${message}`,
         source: "safe",
       });
 
       return null;
     } finally {
       setIsDeploying(false);
+      console.log("[MRKT] =====================================");
     }
-  }, [address, relayClient, relayClientError, isOnPolygon, chain, addLog, checkSafeStatus, safeStatus.proxyAddress]);
+  }, [address, isOnPolygon, chain, isClientReady, addLog, checkSafeStatus, safeStatus.proxyAddress]);
 
   // ============================================
   // Approve USDC for Trading
-  // Per SDK: relayClient.execute(transactions, metadata)
-  // Per Polymarket docs:
-  //   - Standard markets: Approve USDC to CONDITIONAL_TOKENS
-  //   - Neg Risk markets: Approve USDC to NEG_RISK_ADAPTER
   // ============================================
   const approveUSDC = useCallback(
     async (isNegRisk: boolean = false): Promise<boolean> => {
-      if (!address || !relayClient || !safeStatus.proxyAddress) {
-        addLog({
-          level: "error",
-          message: "Safe wallet not ready",
-          source: "safe",
-        });
+      if (!address || !isClientReady || !relayClientRef.current || !safeStatus.proxyAddress) {
+        addLog({ level: "error", message: "Safe wallet not ready", source: "safe" });
         return false;
       }
 
       setIsApproving(true);
 
       try {
-        // Per Polymarket docs: Different approval targets for market types
-        const approvalTarget = isNegRisk
-          ? APPROVAL_TARGETS.NEG_RISK
-          : APPROVAL_TARGETS.STANDARD;
+        const approvalTarget = isNegRisk ? APPROVAL_TARGETS.NEG_RISK : APPROVAL_TARGETS.STANDARD;
         const targetName = isNegRisk ? "Neg Risk Adapter" : "CTF";
 
         addLog({
@@ -392,8 +361,6 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
           source: "safe",
         });
 
-        // Build approval transaction data
-        // ERC20 approve(address spender, uint256 amount)
         const { Interface, MaxUint256 } = await import("ethers");
         const erc20Interface = new Interface([
           "function approve(address spender, uint256 amount) returns (bool)",
@@ -401,10 +368,9 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
 
         const approvalData = erc20Interface.encodeFunctionData("approve", [
           approvalTarget,
-          MaxUint256, // Approve max for convenience
+          MaxUint256,
         ]);
 
-        // Per SDK: SafeTransaction format
         const safeTx: SafeTransaction = {
           to: CONTRACTS.USDC,
           operation: OperationType.Call,
@@ -412,74 +378,37 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
           value: "0",
         };
 
-        addLog({
-          level: "info",
-          message: "Please sign the approval in your wallet...",
-          source: "safe",
-        });
+        const response = await relayClientRef.current.execute([safeTx], `USDC approval for ${targetName}`);
 
-        // Per SDK: execute(transactions, metadata) returns RelayerTransactionResponse
-        const response = await relayClient.execute(
-          [safeTx],
-          `USDC approval for ${targetName}`
-        );
-
-        addLog({
-          level: "info",
-          message: "Approval submitted, waiting for confirmation...",
-          source: "safe",
-          data: { transactionId: response.transactionID },
-        });
-
-        // Per SDK: wait() for transaction confirmation
         let transaction = await response.wait();
 
         if (!transaction && response.transactionID) {
-          transaction = await relayClient.pollUntilState(
+          transaction = await relayClientRef.current.pollUntilState(
             response.transactionID,
             [RelayerTransactionState.STATE_CONFIRMED, RelayerTransactionState.STATE_MINED],
             RelayerTransactionState.STATE_FAILED,
             20,
             2000
           );
-
-          if (!transaction) {
-            throw new Error("Approval transaction timed out");
-          }
         }
 
         addLog({
           level: "success",
           message: `USDC approved for ${targetName}!`,
           source: "safe",
-          data: { txHash: transaction?.transactionHash },
         });
 
         return true;
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Approval failed";
-
-        addLog({
-          level: "error",
-          message: `USDC approval failed: ${message}`,
-          source: "safe",
-        });
-
+        const message = error instanceof Error ? error.message : "Approval failed";
+        addLog({ level: "error", message: `Approval failed: ${message}`, source: "safe" });
         return false;
       } finally {
         setIsApproving(false);
       }
     },
-    [address, relayClient, safeStatus.proxyAddress, addLog]
+    [address, isClientReady, safeStatus.proxyAddress, addLog]
   );
-
-  // ============================================
-  // Refresh Status
-  // ============================================
-  const refreshStatus = useCallback(async () => {
-    await checkSafeStatus();
-  }, [checkSafeStatus]);
 
   // ============================================
   // Auto-check status on wallet connect
@@ -496,6 +425,11 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
       });
     }
   }, [isConnected, address, checkSafeStatus]);
+
+  // Refresh status wrapper for void return
+  const refreshStatus = useCallback(async () => {
+    await checkSafeStatus();
+  }, [checkSafeStatus]);
 
   return {
     safeStatus,
