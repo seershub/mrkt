@@ -1,23 +1,24 @@
 // ============================================
 // MRKT - Polymarket Safe Wallet Hook
-// Client-side Safe deployment and management
-// Uses RelayClient with remote builder authentication
+// Client-side RelayClient with Remote Builder Signing
+// Per SDK docs: RelayClient runs in browser with user's signer
 // ============================================
 
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useAccount, useWalletClient } from "wagmi";
+import { RelayClient } from "@polymarket/builder-relayer-client";
+import { BuilderConfig } from "@polymarket/builder-signing-sdk";
 import { CONTRACTS, APPROVAL_TARGETS } from "@/lib/constants";
 import { useDebugStore } from "@/lib/stores/debug-store";
 
-// Relayer URL
+// Relayer configuration
 const POLY_RELAYER_URL = "https://relayer-v2.polymarket.com";
-const CHAIN_ID = 137;
+const CHAIN_ID = 137; // Polygon Mainnet
 
-// ERC20 ABI for encoding
-const ERC20_APPROVE_SELECTOR = "0x095ea7b3";
-const MAX_UINT256 = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+// Remote builder signing server URL (our API)
+const BUILDER_SIGNING_URL = "/api/polymarket/builder-sign";
 
 interface SafeStatus {
   isDeployed: boolean;
@@ -36,42 +37,14 @@ interface UsePolymarketSafeReturn {
   refreshStatus: () => Promise<void>;
 }
 
-// Encode approve function data
-function encodeApproveData(spender: string): string {
-  const spenderPadded = spender.toLowerCase().replace("0x", "").padStart(64, "0");
-  const amountHex = MAX_UINT256.replace("0x", "");
-  return `${ERC20_APPROVE_SELECTOR}${spenderPadded}${amountHex}`;
-}
-
-// Get builder headers from our signing server
-async function getBuilderHeaders(
-  method: string,
-  path: string,
-  body?: string
-): Promise<Record<string, string>> {
-  try {
-    const response = await fetch("/api/polymarket/builder-sign", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method, path, body }),
-    });
-
-    const result = await response.json();
-    if (!result.success) {
-      console.warn("[MRKT] Builder signing failed:", result.error);
-      return {};
-    }
-
-    return result.headers || {};
-  } catch (error) {
-    console.error("[MRKT] Builder sign request failed:", error);
-    return {};
-  }
-}
+// ERC20 ABI for approval encoding
+const ERC20_INTERFACE = {
+  approve: "function approve(address spender, uint256 amount) returns (bool)",
+};
 
 export function usePolymarketSafe(): UsePolymarketSafeReturn {
   const { address, isConnected } = useAccount();
-  const { data: walletClient } = useWalletClient();
+  const { data: walletClient } = useWalletClient({ chainId: CHAIN_ID });
   const addLog = useDebugStore((s) => s.addLog);
 
   const [safeStatus, setSafeStatus] = useState<SafeStatus>({
@@ -83,6 +56,41 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
   const [isDeploying, setIsDeploying] = useState(false);
   const [isApproving, setIsApproving] = useState(false);
 
+  // Initialize RelayClient with remote builder signing
+  // Per SDK docs: Use remoteBuilderConfig to point to our signing server
+  // SDK supports viem WalletClient directly
+  const relayClient = useMemo(() => {
+    if (!walletClient) return null;
+
+    try {
+      // Configure remote builder signing
+      // The SDK will call our /api/polymarket/builder-sign endpoint
+      // to get HMAC headers for each request
+      const builderConfig = new BuilderConfig({
+        remoteBuilderConfig: {
+          url: BUILDER_SIGNING_URL,
+          // Token is optional - can be used for auth
+          // token: "your-auth-token"
+        },
+      });
+
+      // Initialize RelayClient with user's wallet (viem WalletClient)
+      // and remote builder config (for HMAC signing)
+      const client = new RelayClient(
+        POLY_RELAYER_URL,
+        CHAIN_ID,
+        walletClient,
+        builderConfig
+      );
+
+      console.log("[MRKT] RelayClient initialized with remote signing");
+      return client;
+    } catch (error) {
+      console.error("[MRKT] Failed to initialize RelayClient:", error);
+      return null;
+    }
+  }, [walletClient]);
+
   // Check if Safe is deployed
   const checkSafeStatus = useCallback(async (): Promise<boolean> => {
     if (!address) return false;
@@ -90,16 +98,19 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     setSafeStatus((s) => ({ ...s, isLoading: true, error: null }));
 
     try {
-      // Use /deployed endpoint per SDK
-      const builderHeaders = await getBuilderHeaders("GET", `/deployed?address=${address}`);
+      addLog({
+        level: "info",
+        message: "Checking Safe wallet status...",
+        source: "safe",
+      });
 
+      // Use fetch to check deployed status (doesn't require signer)
       const response = await fetch(
         `${POLY_RELAYER_URL}/deployed?address=${address}`,
         {
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
-            ...builderHeaders,
           },
         }
       );
@@ -111,33 +122,20 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
       const data = await response.json();
       const isDeployed = data.deployed === true;
 
-      // If deployed, get the proxy address
+      // If deployed, get proxy address from nonce endpoint
       let proxyAddress: string | undefined;
       if (isDeployed) {
-        // Calculate or fetch proxy address
-        // The proxy address is deterministically calculated from the owner
-        proxyAddress = data.proxyAddress || data.address;
-
-        // If not in response, try getting nonce which may return it
-        if (!proxyAddress) {
-          try {
-            const nonceHeaders = await getBuilderHeaders("GET", `/nonce?address=${address}&signerType=EOA`);
-            const nonceResponse = await fetch(
-              `${POLY_RELAYER_URL}/nonce?address=${address}&signerType=EOA`,
-              {
-                headers: {
-                  Accept: "application/json",
-                  ...nonceHeaders,
-                },
-              }
-            );
-            if (nonceResponse.ok) {
-              const nonceData = await nonceResponse.json();
-              proxyAddress = nonceData.proxyAddress;
-            }
-          } catch {
-            // Nonce fetch failed, continue without proxy address
+        try {
+          const nonceResponse = await fetch(
+            `${POLY_RELAYER_URL}/nonce?address=${address}&signerType=EOA`,
+            { headers: { Accept: "application/json" } }
+          );
+          if (nonceResponse.ok) {
+            const nonceData = await nonceResponse.json();
+            proxyAddress = nonceData.proxyAddress || data.proxyAddress;
           }
+        } catch {
+          proxyAddress = data.proxyAddress;
         }
       }
 
@@ -177,12 +175,13 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     }
   }, [address, addLog]);
 
-  // Deploy Safe wallet
+  // Deploy Safe wallet using RelayClient
+  // Per SDK: client.deploy() handles all the Gnosis Safe parameters
   const deploySafe = useCallback(async (): Promise<string | null> => {
-    if (!address || !walletClient) {
+    if (!address || !relayClient) {
       addLog({
         level: "error",
-        message: "Wallet not connected",
+        message: "Wallet not connected or RelayClient not initialized",
         source: "safe",
       });
       return null;
@@ -194,146 +193,67 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     try {
       addLog({
         level: "info",
-        message: "Deploying Safe wallet...",
+        message: "Deploying Safe wallet via Relayer...",
         source: "safe",
       });
 
-      // Step 1: Create deployment request
-      // Per SDK, we need to sign a Safe creation message
-      const deployBody = JSON.stringify({
-        owner: address,
-        chainId: CHAIN_ID,
-      });
-
-      // Get builder headers for the deploy request
-      const builderHeaders = await getBuilderHeaders("POST", "/submit", deployBody);
-
-      // Step 2: Sign the deployment message with user's wallet
-      // The relayer expects a specific message format for Safe deployment
-      const message = `Enable Trading on Polymarket`;
-      const timestamp = Math.floor(Date.now() / 1000);
-      const signMessage = `${message}\n\nTimestamp: ${timestamp}\nAddress: ${address}`;
+      // SDK handles all the deployment logic:
+      // 1. Gets the correct Safe factory and parameters
+      // 2. Creates deployment transaction
+      // 3. User signs with their wallet (gasless for them!)
+      // 4. Submits to relayer with builder attribution
+      // 5. Relayer pays gas and deploys
+      const response = await relayClient.deploy();
 
       addLog({
         level: "info",
-        message: "Please sign the message in your wallet to enable trading...",
+        message: `Deployment submitted, waiting for confirmation...`,
         source: "safe",
+        data: { transactionId: response.transactionID },
       });
 
-      // Sign with user's wallet
-      const signature = await walletClient.signMessage({
-        message: signMessage,
-      });
+      // Wait for deployment to complete
+      const transaction = await response.wait();
 
-      addLog({
-        level: "info",
-        message: "Signature received, submitting to relayer...",
-        source: "safe",
-      });
+      if (!transaction) {
+        // Poll for completion as fallback
+        const finalTx = await relayClient.pollUntilState(
+          response.transactionID!,
+          ["STATE_CONFIRMED", "STATE_MINED"],
+          "STATE_FAILED",
+          30, // max polls
+          2000 // poll interval
+        );
 
-      // Step 3: Submit to relayer
-      const submitBody = JSON.stringify({
-        type: "SAFE-CREATE",
-        from: address,
-        chainId: CHAIN_ID,
-        signature: signature,
-        signatureParams: {
-          timestamp: timestamp.toString(),
-        },
-        metadata: "MRKT Safe Deployment",
-      });
-
-      const submitHeaders = await getBuilderHeaders("POST", "/submit", submitBody);
-
-      const response = await fetch(`${POLY_RELAYER_URL}/submit`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          ...submitHeaders,
-        },
-        body: submitBody,
-      });
-
-      const responseText = await response.text();
-      console.log("[MRKT] Relayer response:", response.status, responseText);
-
-      let result;
-      try {
-        result = JSON.parse(responseText);
-      } catch {
-        throw new Error(`Invalid response from relayer: ${responseText.substring(0, 100)}`);
-      }
-
-      if (!response.ok) {
-        throw new Error(result.message || result.error || `Deployment failed: ${response.status}`);
-      }
-
-      // Step 4: Wait for deployment to complete
-      const transactionId = result.transactionID || result.transactionId;
-      if (transactionId) {
-        addLog({
-          level: "info",
-          message: `Deployment submitted, waiting for confirmation... (${transactionId})`,
-          source: "safe",
-        });
-
-        // Poll for completion
-        let attempts = 0;
-        const maxAttempts = 30;
-        while (attempts < maxAttempts) {
-          await new Promise((r) => setTimeout(r, 2000));
-          attempts++;
-
-          try {
-            const txHeaders = await getBuilderHeaders("GET", `/transaction/${transactionId}`);
-            const txResponse = await fetch(
-              `${POLY_RELAYER_URL}/transaction/${transactionId}`,
-              {
-                headers: {
-                  Accept: "application/json",
-                  ...txHeaders,
-                },
-              }
-            );
-
-            if (txResponse.ok) {
-              const txData = await txResponse.json();
-              const state = Array.isArray(txData) ? txData[0]?.state : txData.state;
-
-              if (state === "STATE_CONFIRMED" || state === "STATE_MINED") {
-                break;
-              }
-              if (state === "STATE_FAILED") {
-                throw new Error("Safe deployment failed on-chain");
-              }
-            }
-          } catch (pollError) {
-            console.warn("[MRKT] Poll error:", pollError);
-          }
+        if (!finalTx) {
+          throw new Error("Safe deployment timed out or failed");
         }
       }
 
-      // Step 5: Verify deployment and get proxy address
-      await new Promise((r) => setTimeout(r, 2000)); // Wait a bit more
-      const isDeployed = await checkSafeStatus();
+      // Get the proxy address
+      const proxyAddress = transaction?.proxyAddress;
 
-      if (isDeployed && safeStatus.proxyAddress) {
+      if (proxyAddress) {
+        setSafeStatus({
+          isDeployed: true,
+          proxyAddress,
+          isLoading: false,
+          error: null,
+        });
+
         addLog({
           level: "success",
-          message: `Safe wallet deployed successfully: ${safeStatus.proxyAddress}`,
+          message: `Safe wallet deployed: ${proxyAddress}`,
           source: "safe",
+          data: { proxyAddress, txHash: transaction?.transactionHash },
         });
-        return safeStatus.proxyAddress;
+
+        return proxyAddress;
       }
 
-      // Recheck status
-      const finalCheck = await checkSafeStatus();
-      if (finalCheck) {
-        return safeStatus.proxyAddress || null;
-      }
-
-      throw new Error("Deployment may have succeeded but proxy address not found. Please refresh.");
+      // Recheck status to get proxy address
+      await checkSafeStatus();
+      return safeStatus.proxyAddress || null;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Safe deployment failed";
       setSafeStatus((s) => ({ ...s, error: message }));
@@ -348,12 +268,13 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     } finally {
       setIsDeploying(false);
     }
-  }, [address, walletClient, addLog, checkSafeStatus, safeStatus.proxyAddress]);
+  }, [address, relayClient, addLog, checkSafeStatus, safeStatus.proxyAddress]);
 
-  // Approve USDC for trading
+  // Approve USDC for trading using RelayClient.execute()
+  // Per SDK: execute() runs transactions through the Safe
   const approveUSDC = useCallback(
     async (isNegRisk: boolean = false): Promise<boolean> => {
-      if (!address || !walletClient || !safeStatus.proxyAddress) {
+      if (!address || !relayClient || !safeStatus.proxyAddress) {
         addLog({
           level: "error",
           message: "Safe wallet not ready",
@@ -368,7 +289,7 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
         const approvalTarget = isNegRisk
           ? APPROVAL_TARGETS.NEG_RISK
           : APPROVAL_TARGETS.STANDARD;
-        const targetName = isNegRisk ? "Neg Risk Adapter" : "CTF Exchange";
+        const targetName = isNegRisk ? "Neg Risk Adapter" : "CTF";
 
         addLog({
           level: "info",
@@ -376,39 +297,24 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
           source: "safe",
         });
 
-        // Step 1: Get nonce for Safe transaction
-        const nonceHeaders = await getBuilderHeaders(
-          "GET",
-          `/nonce?address=${address}&signerType=EOA`
-        );
-        const nonceResponse = await fetch(
-          `${POLY_RELAYER_URL}/nonce?address=${address}&signerType=EOA`,
-          {
-            headers: {
-              Accept: "application/json",
-              ...nonceHeaders,
-            },
-          }
-        );
+        // Build approval transaction
+        // Per SDK: SafeTransaction format
+        const { Interface, MaxUint256 } = await import("ethers");
+        const erc20Interface = new Interface([
+          "function approve(address spender, uint256 amount) returns (bool)",
+        ]);
 
-        if (!nonceResponse.ok) {
-          throw new Error("Failed to get Safe nonce");
-        }
+        const approvalData = erc20Interface.encodeFunctionData("approve", [
+          approvalTarget,
+          MaxUint256, // Approve max for convenience
+        ]);
 
-        const { nonce } = await nonceResponse.json();
-
-        // Step 2: Construct Safe transaction for approval
         const safeTx = {
           to: CONTRACTS.USDC,
           operation: 0, // Call
-          data: encodeApproveData(approvalTarget),
+          data: approvalData,
           value: "0",
         };
-
-        // Step 3: Sign the Safe transaction
-        // Create the message to sign (simplified - actual Safe tx hash is more complex)
-        const timestamp = Math.floor(Date.now() / 1000);
-        const txMessage = `Approve USDC for trading on ${targetName}\n\nTimestamp: ${timestamp}\nNonce: ${nonce}`;
 
         addLog({
           level: "info",
@@ -416,102 +322,42 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
           source: "safe",
         });
 
-        const signature = await walletClient.signMessage({
-          message: txMessage,
+        // Execute through Safe via Relayer
+        // SDK handles: signing, nonce, relayer submission
+        const response = await relayClient.execute(
+          [safeTx],
+          `USDC approval for ${targetName}`
+        );
+
+        addLog({
+          level: "info",
+          message: "Approval submitted, waiting for confirmation...",
+          source: "safe",
+          data: { transactionId: response.transactionID },
         });
 
-        // Step 4: Submit to relayer
-        const submitBody = JSON.stringify({
-          type: "SAFE",
-          from: address,
-          to: safeStatus.proxyAddress,
-          proxyWallet: safeStatus.proxyAddress,
-          data: JSON.stringify([safeTx]),
-          nonce: nonce,
-          signature: signature,
-          signatureParams: {},
-          metadata: `MRKT USDC Approval to ${targetName}`,
-        });
+        // Wait for transaction
+        const transaction = await response.wait();
 
-        const submitHeaders = await getBuilderHeaders("POST", "/submit", submitBody);
+        if (!transaction) {
+          const finalTx = await relayClient.pollUntilState(
+            response.transactionID!,
+            ["STATE_CONFIRMED", "STATE_MINED"],
+            "STATE_FAILED",
+            20,
+            2000
+          );
 
-        const response = await fetch(`${POLY_RELAYER_URL}/submit`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-            ...submitHeaders,
-          },
-          body: submitBody,
-        });
-
-        const responseText = await response.text();
-        console.log("[MRKT] Approval response:", response.status, responseText);
-
-        let result;
-        try {
-          result = JSON.parse(responseText);
-        } catch {
-          throw new Error(`Invalid response: ${responseText.substring(0, 100)}`);
-        }
-
-        if (!response.ok) {
-          throw new Error(result.message || result.error || `Approval failed: ${response.status}`);
-        }
-
-        // Wait for confirmation
-        const transactionId = result.transactionID || result.transactionId;
-        if (transactionId) {
-          addLog({
-            level: "info",
-            message: "Approval submitted, waiting for confirmation...",
-            source: "safe",
-          });
-
-          // Poll for completion
-          let attempts = 0;
-          while (attempts < 20) {
-            await new Promise((r) => setTimeout(r, 2000));
-            attempts++;
-
-            try {
-              const txHeaders = await getBuilderHeaders("GET", `/transaction/${transactionId}`);
-              const txResponse = await fetch(
-                `${POLY_RELAYER_URL}/transaction/${transactionId}`,
-                {
-                  headers: {
-                    Accept: "application/json",
-                    ...txHeaders,
-                  },
-                }
-              );
-
-              if (txResponse.ok) {
-                const txData = await txResponse.json();
-                const state = Array.isArray(txData) ? txData[0]?.state : txData.state;
-
-                if (state === "STATE_CONFIRMED" || state === "STATE_MINED") {
-                  addLog({
-                    level: "success",
-                    message: `USDC approved for ${targetName}!`,
-                    source: "safe",
-                  });
-                  return true;
-                }
-                if (state === "STATE_FAILED") {
-                  throw new Error("Approval transaction failed on-chain");
-                }
-              }
-            } catch (pollError) {
-              console.warn("[MRKT] Poll error:", pollError);
-            }
+          if (!finalTx) {
+            throw new Error("Approval transaction timed out");
           }
         }
 
         addLog({
           level: "success",
-          message: `USDC approval submitted for ${targetName}`,
+          message: `USDC approved for ${targetName}!`,
           source: "safe",
+          data: { txHash: transaction?.transactionHash },
         });
 
         return true;
@@ -529,7 +375,7 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
         setIsApproving(false);
       }
     },
-    [address, walletClient, safeStatus.proxyAddress, addLog]
+    [address, relayClient, safeStatus.proxyAddress, addLog]
   );
 
   // Refresh status
