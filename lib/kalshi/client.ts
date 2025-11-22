@@ -1,6 +1,7 @@
 // ============================================
 // MRKT - Kalshi API Client
-// RSA-SHA256 signed requests for US regulated markets
+// Public API client for market data (Edge compatible)
+// Note: Authenticated requests use separate server-only module
 // ============================================
 
 import { API_ENDPOINTS } from "@/lib/constants";
@@ -98,86 +99,15 @@ export function transformKalshiMarket(
   };
 }
 
-// Kalshi client class (for server-side use)
+// Kalshi client class (Edge compatible - public endpoints only)
 export class KalshiClient {
   private baseUrl: string;
-  private apiKeyId: string | null;
-  private privateKey: string | null;
-  private mockMode: boolean;
 
   constructor() {
     this.baseUrl = KALSHI_URL;
-    this.apiKeyId = process.env.KALSHI_API_KEY_ID || null;
-    // Handle newline replacement in private key
-    this.privateKey = process.env.KALSHI_PRIVATE_KEY?.replace(/\\n/g, "\n") || null;
-    this.mockMode = !this.apiKeyId || !this.privateKey;
-
-    if (this.mockMode) {
-      console.warn("[MRKT] Kalshi running in MOCK MODE - API keys not configured");
-    }
   }
 
-  // Generate RSA-SHA256 signature for Kalshi API
-  private async generateSignature(
-    timestamp: string,
-    method: string,
-    path: string,
-    body?: string
-  ): Promise<string> {
-    if (!this.privateKey) {
-      throw new Error("Kalshi private key not configured");
-    }
-
-    // Create message to sign
-    const message = `${timestamp}${method}${path}${body || ""}`;
-
-    // In Node.js environment (API routes), use crypto
-    if (typeof window === "undefined") {
-      const crypto = await import("crypto");
-      const sign = crypto.createSign("RSA-SHA256");
-      sign.update(message);
-      sign.end();
-      return sign.sign(this.privateKey, "base64");
-    }
-
-    throw new Error("Kalshi signing must be done server-side");
-  }
-
-  // Make authenticated request to Kalshi API
-  private async authenticatedRequest<T>(
-    method: string,
-    path: string,
-    body?: object
-  ): Promise<T> {
-    if (this.mockMode) {
-      throw new Error("MOCK_MODE: Kalshi API keys not configured");
-    }
-
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const bodyString = body ? JSON.stringify(body) : undefined;
-
-    const signature = await this.generateSignature(timestamp, method, path, bodyString);
-
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        "KALSHI-ACCESS-KEY": this.apiKeyId!,
-        "KALSHI-ACCESS-SIGNATURE": signature,
-        "KALSHI-ACCESS-TIMESTAMP": timestamp,
-      },
-      body: bodyString,
-    });
-
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ message: response.statusText }));
-      throw new Error(`Kalshi API error: ${response.status} - ${JSON.stringify(error)}`);
-    }
-
-    return response.json() as Promise<T>;
-  }
-
-  // Make public (unauthenticated) request
+  // Make public (unauthenticated) request - Edge compatible
   private async publicRequest<T>(path: string): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       headers: {
@@ -193,9 +123,11 @@ export class KalshiClient {
     return response.json() as Promise<T>;
   }
 
-  // Check if running in mock mode
+  // Check if authenticated mode is available (always false in Edge)
   isMockMode(): boolean {
-    return this.mockMode;
+    // Authenticated features require server-side Node.js runtime
+    // Use /api/kalshi/order for authenticated requests
+    return true;
   }
 
   // Get sports events
@@ -270,55 +202,7 @@ export class KalshiClient {
       return null;
     }
   }
-
-  // Place order (requires authentication)
-  async placeOrder(params: {
-    ticker: string;
-    side: "yes" | "no";
-    action: "buy" | "sell";
-    count: number;
-    type: "market" | "limit";
-    price?: number; // For limit orders, in cents (1-99)
-  }): Promise<{ order_id: string }> {
-    return this.authenticatedRequest<{ order_id: string }>("POST", "/portfolio/orders", {
-      ticker: params.ticker,
-      side: params.side,
-      action: params.action,
-      count: params.count,
-      type: params.type,
-      ...(params.type === "limit" && params.price ? { yes_price: params.price } : {}),
-    });
-  }
-
-  // Get user positions
-  async getPositions(): Promise<
-    {
-      ticker: string;
-      position: number;
-      market_exposure: number;
-      realized_pnl: number;
-    }[]
-  > {
-    const data = await this.authenticatedRequest<{
-      market_positions: {
-        ticker: string;
-        position: number;
-        market_exposure: number;
-        realized_pnl: number;
-      }[];
-    }>("GET", "/portfolio/positions");
-
-    return data.market_positions || [];
-  }
-
-  // Get user balance
-  async getBalance(): Promise<{ available_balance: number; total_balance: number }> {
-    return this.authenticatedRequest<{
-      available_balance: number;
-      total_balance: number;
-    }>("GET", "/portfolio/balance");
-  }
 }
 
-// Export singleton (will be in mock mode on client)
+// Export singleton for public endpoints
 export const kalshiClient = new KalshiClient();
