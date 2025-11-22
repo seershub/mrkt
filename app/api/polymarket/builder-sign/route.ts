@@ -89,11 +89,10 @@ export async function POST(request: NextRequest) {
 
     console.log("[MRKT] Generated builder headers for:", { method, path });
 
-    return NextResponse.json({
-      success: true,
-      headers: headers,
-      timestamp: ts,
-    });
+    // Per SDK: Return headers object directly (not wrapped)
+    // The SDK's http-helpers post() function returns resp.data directly
+    // and expects to receive the headers object to use in requests
+    return NextResponse.json(headers);
   } catch (error) {
     console.error("[MRKT] Builder sign error:", error);
 
