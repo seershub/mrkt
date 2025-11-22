@@ -5,16 +5,65 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { ApiResponse } from "@/types";
+import { keccak256, encodePacked, getAddress } from "viem";
+import { CONTRACTS } from "@/lib/constants";
 
 export const runtime = "edge";
 
 const POLY_RELAYER_URL = "https://relayer.polymarket.com";
 
+// Gnosis Safe constants for computing CREATE2 address
+const SAFE_SINGLETON = "0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552";
+
 interface ProxyStatus {
   hasProxy: boolean;
   proxyAddress?: string;
+  computedAddress?: string; // Always returned so users can fund before deployment
   isDeployed?: boolean;
   allowance?: string;
+}
+
+// Compute the deterministic proxy address using CREATE2
+// This allows users to see their proxy address and fund it before deployment
+function computeProxyAddress(ownerAddress: string): string {
+  try {
+    // Polymarket uses a specific salt based on owner address
+    const salt = keccak256(
+      encodePacked(
+        ["address", "uint256"],
+        [getAddress(ownerAddress), BigInt(0)]
+      )
+    );
+
+    // Simplified proxy init code hash for Gnosis Safe
+    const proxyInitCode = encodePacked(
+      ["bytes", "bytes32"],
+      [
+        "0x608060405234801561001057600080fd5b50" as `0x${string}`,
+        keccak256(encodePacked(["address"], [SAFE_SINGLETON as `0x${string}`])),
+      ]
+    );
+    const initCodeHash = keccak256(proxyInitCode);
+
+    // CREATE2 formula: keccak256(0xff ++ factory ++ salt ++ initCodeHash)
+    const create2Address = keccak256(
+      encodePacked(
+        ["bytes1", "address", "bytes32", "bytes32"],
+        [
+          "0xff",
+          CONTRACTS.SAFE_PROXY_FACTORY as `0x${string}`,
+          salt,
+          initCodeHash,
+        ]
+      )
+    );
+
+    // Extract last 20 bytes as address
+    return getAddress(`0x${create2Address.slice(-40)}`);
+  } catch (error) {
+    console.error("[MRKT] Failed to compute proxy address:", error);
+    return "";
+  }
 }
 
 // GET - Check proxy status for an address
@@ -36,6 +85,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    // Always compute expected proxy address (useful for pre-funding)
+    const computedAddress = computeProxyAddress(address);
+
     // Check if user has a proxy wallet on Polymarket
     const proxyResponse = await fetch(
       `${POLY_RELAYER_URL}/proxy/${address}`,
@@ -47,11 +99,13 @@ export async function GET(request: NextRequest) {
     );
 
     if (proxyResponse.status === 404) {
-      // No proxy exists
+      // No proxy exists yet - return computed address for pre-funding
       const response: ApiResponse<ProxyStatus> = {
         success: true,
         data: {
           hasProxy: false,
+          computedAddress: computedAddress || undefined,
+          isDeployed: false,
         },
         timestamp: new Date().toISOString(),
       };
@@ -64,12 +118,14 @@ export async function GET(request: NextRequest) {
     }
 
     const proxyData = await proxyResponse.json();
+    const actualProxyAddress = proxyData.proxy || proxyData.address;
 
     const response: ApiResponse<ProxyStatus> = {
       success: true,
       data: {
         hasProxy: true,
-        proxyAddress: proxyData.proxy || proxyData.address,
+        proxyAddress: actualProxyAddress,
+        computedAddress: computedAddress || actualProxyAddress,
         isDeployed: proxyData.deployed !== false,
         allowance: proxyData.allowance,
       },

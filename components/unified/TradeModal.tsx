@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
@@ -10,8 +10,10 @@ import {
   Wallet,
   TrendingUp,
   ArrowRight,
+  Shield,
+  RefreshCw,
 } from "lucide-react";
-import { useAccount, useConnect } from "wagmi";
+import { useAccount } from "wagmi";
 import { useConnectModal } from "@rainbow-me/rainbowkit";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +21,7 @@ import { cn, formatCurrency, formatProbability } from "@/lib/utils";
 import { useDebugStore } from "@/lib/stores/debug-store";
 import { QUICK_BUY_AMOUNTS, TRADING } from "@/lib/constants";
 import { UnifiedMarket, MarketOutcome, TradeQuote } from "@/types";
+import { useUnifiedTrade } from "@/hooks/useUnifiedTrade";
 import { toast } from "sonner";
 
 interface TradeModalProps {
@@ -37,7 +40,7 @@ function calculateQuote(
   const price = outcome.price;
   const shares = side === "buy" ? amount / price : amount;
   const cost = side === "buy" ? amount : shares * price;
-  const payout = side === "buy" ? shares * 1 : amount; // $1 per share at resolution
+  const payout = side === "buy" ? shares * 1 : amount;
   const fees = cost * 0.02; // 2% fee estimate
   const profit = payout - cost - fees;
   const profitPercent = cost > 0 ? (profit / cost) * 100 : 0;
@@ -63,16 +66,43 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
   const { openConnectModal } = useConnectModal();
   const addLog = useDebugStore((s) => s.addLog);
 
+  // Trade hook
+  const {
+    tradeState,
+    proxyStatus,
+    usdcBalance,
+    kalshiBalance,
+    checkProxyStatus,
+    deployProxy,
+    approveUSDC,
+    executeTrade,
+    resetState,
+  } = useUnifiedTrade();
+
   // State
   const [amount, setAmount] = useState<number>(10);
   const [side] = useState<"buy" | "sell">("buy");
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Calculate quote
   const quote = useMemo(() => calculateQuote(outcome, amount, side), [outcome, amount, side]);
 
   const isYes = outcome.name.toLowerCase() === "yes";
   const probability = Math.round(outcome.price * 100);
+
+  // Determine available balance based on platform
+  const availableBalance = market.platform === "polymarket" ? usdcBalance : kalshiBalance;
+  const hasInsufficientBalance = side === "buy" && amount > availableBalance;
+
+  // Determine if proxy deployment is needed (Polymarket only)
+  const needsProxyDeployment = market.platform === "polymarket" && proxyStatus?.needsDeployment;
+
+  // Check if any loading state is active
+  const isLoading =
+    tradeState.isLoading ||
+    tradeState.isCheckingProxy ||
+    tradeState.isApproving ||
+    tradeState.isSigning ||
+    tradeState.isSubmitting;
 
   // Handle amount change
   const handleAmountChange = useCallback((value: string) => {
@@ -81,6 +111,20 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
       setAmount(Math.min(num, TRADING.MAX_ORDER_AMOUNT));
     }
   }, []);
+
+  // Handle proxy deployment
+  const handleDeployProxy = useCallback(async () => {
+    const result = await deployProxy();
+    if (result) {
+      toast.success("Proxy wallet deployed!", {
+        description: "You can now trade on Polymarket",
+      });
+    } else {
+      toast.error("Deployment failed", {
+        description: tradeState.error || "Please try again",
+      });
+    }
+  }, [deployProxy, tradeState.error]);
 
   // Handle trade submission
   const handleSubmit = useCallback(async () => {
@@ -94,50 +138,59 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
       return;
     }
 
-    setIsSubmitting(true);
+    if (hasInsufficientBalance) {
+      toast.error("Insufficient balance", {
+        description: `You have ${formatCurrency(availableBalance)} but need ${formatCurrency(amount)}`,
+      });
+      return;
+    }
 
-    addLog({
-      level: "info",
-      message: `Placing ${side} order for ${outcome.name}`,
-      data: {
-        market: market.id,
-        outcome: outcome.id,
-        amount,
-        price: outcome.price,
-      },
-      source: "trade",
+    // Execute the trade
+    const result = await executeTrade({
+      market,
+      outcome,
+      amount,
+      side,
     });
 
-    try {
-      // TODO: Implement actual trading logic
-      // For now, simulate a delay and show success
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      addLog({
-        level: "success",
-        message: "Order placed successfully (simulated)",
-        source: "trade",
-      });
-
+    if (result.success) {
       toast.success("Order placed successfully!", {
         description: `${side === "buy" ? "Bought" : "Sold"} ${quote.estimatedShares.toFixed(2)} shares of ${outcome.name}`,
       });
-
       onClose();
-    } catch (error) {
-      addLog({
-        level: "error",
-        message: `Order failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-        source: "trade",
-      });
-
+    } else {
       toast.error("Order failed", {
-        description: error instanceof Error ? error.message : "Please try again",
+        description: result.error || "Please try again",
       });
-    } finally {
-      setIsSubmitting(false);
     }
-  }, [isConnected, openConnectModal, amount, side, outcome, market, quote, addLog, onClose]);
+  }, [
+    isConnected,
+    openConnectModal,
+    amount,
+    hasInsufficientBalance,
+    availableBalance,
+    executeTrade,
+    market,
+    outcome,
+    side,
+    quote.estimatedShares,
+    onClose,
+  ]);
+
+  // Reset state on close
+  useEffect(() => {
+    if (!isOpen) {
+      resetState();
+      setAmount(10);
+    }
+  }, [isOpen, resetState]);
+
+  // Refresh proxy status on open
+  useEffect(() => {
+    if (isOpen && isConnected && market.platform === "polymarket") {
+      checkProxyStatus();
+    }
+  }, [isOpen, isConnected, market.platform, checkProxyStatus]);
 
   if (!isOpen) return null;
 
@@ -169,6 +222,9 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
                   <h2 className="text-lg font-semibold text-neutral-100">
                     Place Your Bet
                   </h2>
+                  <Badge variant={market.platform === "polymarket" ? "brand" : "info"}>
+                    {market.platform === "polymarket" ? "Poly" : "Kalshi"}
+                  </Badge>
                 </div>
                 <button
                   onClick={onClose}
@@ -206,6 +262,58 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
                   </div>
                 </div>
 
+                {/* Balance Display */}
+                <div className="flex items-center justify-between p-3 bg-neutral-800/30 rounded-lg border border-neutral-700/50">
+                  <div className="flex items-center gap-2">
+                    <Wallet className="w-4 h-4 text-neutral-400" />
+                    <span className="text-sm text-neutral-400">Available Balance</span>
+                  </div>
+                  <span
+                    className={cn(
+                      "text-sm font-mono font-medium",
+                      hasInsufficientBalance ? "text-red-400" : "text-brand-400"
+                    )}
+                  >
+                    {formatCurrency(availableBalance)}
+                  </span>
+                </div>
+
+                {/* Proxy Deployment Warning (Polymarket only) */}
+                {needsProxyDeployment && (
+                  <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+                    <div className="flex items-start gap-2">
+                      <Shield className="w-4 h-4 text-yellow-400 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-yellow-400">
+                          Proxy Wallet Required
+                        </p>
+                        <p className="text-xs text-yellow-400/80 mt-1">
+                          Polymarket requires a proxy wallet for trading. Deploy one to continue.
+                        </p>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={handleDeployProxy}
+                          disabled={isLoading}
+                          className="mt-2 border-yellow-500/30 text-yellow-400 hover:bg-yellow-500/10"
+                        >
+                          {tradeState.isLoading ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                              Deploying...
+                            </>
+                          ) : (
+                            <>
+                              <Shield className="w-3 h-3 mr-1" />
+                              Deploy Proxy Wallet
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Amount Input */}
                 <div>
                   <label className="block text-sm text-neutral-400 mb-2">
@@ -222,9 +330,22 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
                       min={TRADING.MIN_ORDER_AMOUNT}
                       max={TRADING.MAX_ORDER_AMOUNT}
                       step="1"
-                      className="w-full pl-7 pr-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-lg font-mono text-neutral-200 focus:outline-none focus:ring-2 focus:ring-brand-500/50 focus:border-brand-500"
+                      className={cn(
+                        "w-full pl-7 pr-4 py-3 bg-neutral-800 border rounded-lg text-lg font-mono text-neutral-200",
+                        "focus:outline-none focus:ring-2 focus:ring-brand-500/50 focus:border-brand-500",
+                        hasInsufficientBalance
+                          ? "border-red-500/50"
+                          : "border-neutral-700"
+                      )}
                     />
                   </div>
+
+                  {/* Insufficient balance warning */}
+                  {hasInsufficientBalance && (
+                    <p className="text-xs text-red-400 mt-1">
+                      Insufficient balance. You need {formatCurrency(amount - availableBalance)} more.
+                    </p>
+                  )}
 
                   {/* Quick Amount Buttons */}
                   <div className="flex flex-wrap gap-2 mt-2">
@@ -236,12 +357,21 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
                           "px-3 py-1.5 rounded-lg text-sm font-medium transition-all",
                           amount === quickAmount
                             ? "bg-brand-500/20 text-brand-400 border border-brand-500/30"
-                            : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-200"
+                            : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-200",
+                          quickAmount > availableBalance && "opacity-50"
                         )}
                       >
                         ${quickAmount}
                       </button>
                     ))}
+                    {/* Max button */}
+                    <button
+                      onClick={() => setAmount(Math.floor(availableBalance))}
+                      disabled={availableBalance < TRADING.MIN_ORDER_AMOUNT}
+                      className="px-3 py-1.5 rounded-lg text-sm font-medium bg-neutral-800 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-200 disabled:opacity-50"
+                    >
+                      Max
+                    </button>
                   </div>
                 </div>
 
@@ -296,12 +426,20 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
                   </div>
                 </div>
 
-                {/* Warning */}
-                <div className="flex items-start gap-2 p-3 bg-warning-500/10 border border-warning-500/20 rounded-lg">
-                  <AlertCircle className="w-4 h-4 text-warning-400 flex-shrink-0 mt-0.5" />
-                  <p className="text-xs text-warning-400">
+                {/* Error Display */}
+                {tradeState.error && (
+                  <div className="flex items-start gap-2 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
+                    <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                    <p className="text-xs text-red-400">{tradeState.error}</p>
+                  </div>
+                )}
+
+                {/* Info Notice */}
+                <div className="flex items-start gap-2 p-3 bg-neutral-800/30 border border-neutral-700/30 rounded-lg">
+                  <AlertCircle className="w-4 h-4 text-neutral-500 flex-shrink-0 mt-0.5" />
+                  <p className="text-xs text-neutral-500">
                     Trading involves risk. Only bet what you can afford to lose.
-                    This is a demo - no real trades will be executed.
+                    {market.platform === "polymarket" && " Orders are signed with your wallet."}
                   </p>
                 </div>
               </div>
@@ -313,13 +451,23 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
                 </Button>
                 <Button
                   onClick={handleSubmit}
-                  disabled={isSubmitting || amount < TRADING.MIN_ORDER_AMOUNT}
+                  disabled={
+                    isLoading ||
+                    amount < TRADING.MIN_ORDER_AMOUNT ||
+                    hasInsufficientBalance ||
+                    needsProxyDeployment
+                  }
                   className="flex-1 gap-2"
                 >
-                  {isSubmitting ? (
+                  {tradeState.isSigning ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Placing...
+                      Signing...
+                    </>
+                  ) : tradeState.isSubmitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Submitting...
                     </>
                   ) : !isConnected ? (
                     <>

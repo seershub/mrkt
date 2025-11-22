@@ -9,14 +9,13 @@ import {
   X,
   BarChart3,
   Trophy,
-  User,
-  Settings,
+  Wallet,
 } from "lucide-react";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useAccount } from "wagmi";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useDebugStore } from "@/lib/stores/debug-store";
+import { SmartBalance } from "@/components/wallet/SmartBalance";
 
 const navLinks = [
   { href: "/", label: "Markets", icon: TrendingUp },
@@ -87,6 +86,13 @@ export function Header() {
 
           {/* Right Section */}
           <div className="flex items-center gap-3">
+            {/* Smart Balance (Trading USDC) - Desktop only */}
+            {isConnected && (
+              <div className="hidden lg:block">
+                <SmartBalance compact />
+              </div>
+            )}
+
             {/* Connect Wallet Button */}
             <div className="hidden sm:block">
               <ConnectButton
@@ -95,10 +101,7 @@ export function Header() {
                   smallScreen: "avatar",
                   largeScreen: "full",
                 }}
-                showBalance={{
-                  smallScreen: false,
-                  largeScreen: true,
-                }}
+                showBalance={false}
               />
             </div>
 
@@ -148,6 +151,13 @@ export function Header() {
                   {link.label}
                 </Link>
               ))}
+
+              {/* Mobile Balance Display */}
+              {isConnected && (
+                <div className="px-4 pt-3 mt-2 border-t border-neutral-800">
+                  <SmartBalance />
+                </div>
+              )}
             </div>
           </motion.nav>
         )}
