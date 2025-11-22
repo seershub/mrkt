@@ -65,8 +65,9 @@ interface UsePolymarketSafeReturn {
 // ============================================
 
 export function usePolymarketSafe(): UsePolymarketSafeReturn {
-  const { address, isConnected } = useAccount();
-  const { data: walletClient } = useWalletClient({ chainId: CHAIN_ID });
+  const { address, isConnected, chain } = useAccount();
+  // Get walletClient without chainId filter - we'll handle chain switching
+  const { data: walletClient, isLoading: isWalletLoading } = useWalletClient();
   const addLog = useDebugStore((s) => s.addLog);
 
   // State
@@ -78,6 +79,10 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
   });
   const [isDeploying, setIsDeploying] = useState(false);
   const [isApproving, setIsApproving] = useState(false);
+  const [relayClientError, setRelayClientError] = useState<string | null>(null);
+
+  // Check if on correct chain
+  const isOnPolygon = chain?.id === CHAIN_ID;
 
   // ============================================
   // Initialize RelayClient
@@ -85,24 +90,37 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
   // SDK accepts WalletClient directly via createAbstractSigner
   // ============================================
   const relayClient = useMemo(() => {
-    if (!walletClient) return null;
+    // Clear previous error
+    setRelayClientError(null);
+
+    if (!walletClient) {
+      console.log("[MRKT] RelayClient: walletClient not available yet");
+      return null;
+    }
+
+    if (!isOnPolygon) {
+      console.log("[MRKT] RelayClient: Not on Polygon chain, current chain:", chain?.id);
+      setRelayClientError(`Please switch to Polygon network (current: ${chain?.name || 'Unknown'})`);
+      return null;
+    }
 
     try {
       // Per SDK docs: Use remoteBuilderConfig for HMAC signing
-      // The SDK will POST to our /api/polymarket/builder-sign endpoint
-      // to generate HMAC headers for each authenticated request
       const builderSigningUrl = getBuilderSigningUrl();
       console.log("[MRKT] Builder signing URL:", builderSigningUrl);
+      console.log("[MRKT] WalletClient available:", !!walletClient);
+      console.log("[MRKT] WalletClient account:", walletClient.account?.address);
+      console.log("[MRKT] WalletClient chain:", walletClient.chain?.id);
 
       const builderConfig = new BuilderConfig({
         remoteBuilderConfig: {
           url: builderSigningUrl,
-          // token is optional - for additional auth
         },
       });
 
+      console.log("[MRKT] BuilderConfig created successfully");
+
       // Per SDK: RelayClient accepts viem WalletClient directly
-      // The SDK uses createAbstractSigner internally to convert
       const client = new RelayClient(
         POLY_RELAYER_URL,
         CHAIN_ID,
@@ -110,13 +128,22 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
         builderConfig
       );
 
-      console.log("[MRKT] RelayClient initialized with remote signing");
+      console.log("[MRKT] RelayClient initialized successfully with remote signing");
       return client;
     } catch (error) {
-      console.error("[MRKT] Failed to initialize RelayClient:", error);
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error("[MRKT] Failed to initialize RelayClient:", errorMsg, error);
+      setRelayClientError(errorMsg);
+
+      addLog({
+        level: "error",
+        message: `RelayClient init failed: ${errorMsg}`,
+        source: "safe",
+      });
+
       return null;
     }
-  }, [walletClient]);
+  }, [walletClient, isOnPolygon, chain, addLog]);
 
   // ============================================
   // Check Safe Deployment Status
@@ -213,10 +240,29 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
   // Returns RelayerTransactionResponse with wait() method
   // ============================================
   const deploySafe = useCallback(async (): Promise<string | null> => {
-    if (!address || !relayClient) {
+    if (!address) {
       addLog({
         level: "error",
-        message: "Wallet not connected or RelayClient not initialized",
+        message: "Wallet not connected. Please connect your wallet first.",
+        source: "safe",
+      });
+      return null;
+    }
+
+    if (!isOnPolygon) {
+      addLog({
+        level: "error",
+        message: `Please switch to Polygon network. Current: ${chain?.name || 'Unknown'}`,
+        source: "safe",
+      });
+      return null;
+    }
+
+    if (!relayClient) {
+      const errorMsg = relayClientError || "RelayClient not initialized. Please refresh the page.";
+      addLog({
+        level: "error",
+        message: errorMsg,
         source: "safe",
       });
       return null;
@@ -301,7 +347,7 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     } finally {
       setIsDeploying(false);
     }
-  }, [address, relayClient, addLog, checkSafeStatus, safeStatus.proxyAddress]);
+  }, [address, relayClient, relayClientError, isOnPolygon, chain, addLog, checkSafeStatus, safeStatus.proxyAddress]);
 
   // ============================================
   // Approve USDC for Trading
