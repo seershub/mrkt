@@ -113,8 +113,9 @@ export async function GET(request: NextRequest) {
 
   try {
     // Fetch from both platforms in parallel
+    // Use getAllEvents() to get ALL markets (not just sports)
     const [polymarketMarkets, kalshiMarkets] = await Promise.allSettled([
-      polymarketClient.getSportsEvents(),
+      polymarketClient.getAllEvents(100),
       kalshiClient.getSportsEvents(),
     ]);
 
@@ -122,16 +123,20 @@ export async function GET(request: NextRequest) {
     let allMarkets: UnifiedMarket[] = [];
 
     if (polymarketMarkets.status === "fulfilled") {
+      console.log("[MRKT] Polymarket fetched:", polymarketMarkets.value.length, "markets");
       allMarkets = allMarkets.concat(polymarketMarkets.value);
     } else {
       console.error("[MRKT] Polymarket fetch failed:", polymarketMarkets.reason);
     }
 
     if (kalshiMarkets.status === "fulfilled") {
+      console.log("[MRKT] Kalshi fetched:", kalshiMarkets.value.length, "markets");
       allMarkets = allMarkets.concat(kalshiMarkets.value);
     } else {
       console.error("[MRKT] Kalshi fetch failed:", kalshiMarkets.reason);
     }
+
+    console.log("[MRKT] Total markets before filter:", allMarkets.length);
 
     // Apply filters
     const filteredMarkets = filterMarkets(allMarkets, {

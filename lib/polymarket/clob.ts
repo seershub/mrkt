@@ -196,18 +196,16 @@ export class PolymarketClient {
     this.dataUrl = DATA_URL;
   }
 
-  // Fetch sports events from Gamma API
-  // Per docs: Use /events endpoint with proper parameters
-  async getSportsEvents(): Promise<UnifiedMarket[]> {
-    // Per docs: order=id, ascending=false, closed=false for active markets
-    // Note: tag filtering should use tag_id parameter with sport tag IDs
+  // Fetch ALL active events from Gamma API (no category filter)
+  // This is the main method for getting markets
+  async getAllEvents(limit = 100): Promise<UnifiedMarket[]> {
     const response = await fetch(
-      `${this.gammaUrl}/events?closed=false&order=id&ascending=false&limit=100`,
+      `${this.gammaUrl}/events?closed=false&order=id&ascending=false&limit=${limit}`,
       {
         headers: {
           Accept: "application/json",
         },
-        next: { revalidate: 60 }, // Cache for 60 seconds
+        next: { revalidate: 60 },
       }
     );
 
@@ -217,10 +215,16 @@ export class PolymarketClient {
 
     const events = (await response.json()) as (PolymarketEvent & { negRisk?: boolean })[];
 
-    // Transform all events to unified markets and filter sports
-    return events
-      .flatMap(transformPolymarketEvent)
-      .filter((m) => m.category !== "other");
+    // Transform all events to unified markets (no filtering)
+    return events.flatMap(transformPolymarketEvent);
+  }
+
+  // Fetch sports events from Gamma API (filtered)
+  // Per docs: Use /events endpoint with proper parameters
+  async getSportsEvents(): Promise<UnifiedMarket[]> {
+    // Get all events first, then filter for sports
+    const allMarkets = await this.getAllEvents();
+    return allMarkets.filter((m) => m.category !== "other");
   }
 
   // Fetch all active markets
