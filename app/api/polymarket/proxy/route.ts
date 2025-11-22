@@ -47,6 +47,31 @@ interface ProxyStatus {
   allowance?: string;
 }
 
+// Safe JSON parse with error handling
+async function safeParseJson(response: Response): Promise<{ data: unknown; error?: string }> {
+  const contentType = response.headers.get("content-type") || "";
+  const text = await response.text();
+
+  // Log raw response for debugging
+  console.log("[MRKT] Relayer response:", response.status, contentType, text.substring(0, 200));
+
+  // Check if response is JSON
+  if (!contentType.includes("application/json")) {
+    // Try to extract error from HTML if it's Cloudflare page
+    if (text.includes("cloudflare") || text.includes("<!DOCTYPE")) {
+      return { data: null, error: "Relayer blocked by Cloudflare - try again later" };
+    }
+    return { data: null, error: `Unexpected content type: ${contentType}` };
+  }
+
+  try {
+    return { data: JSON.parse(text) };
+  } catch (parseError) {
+    console.error("[MRKT] JSON parse error:", parseError, "Raw:", text.substring(0, 100));
+    return { data: null, error: `Invalid JSON response: ${text.substring(0, 50)}...` };
+  }
+}
+
 // GET - Check proxy status for an address
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -67,14 +92,17 @@ export async function GET(request: NextRequest) {
 
   try {
     // Query V2 relayer for proxy status
-    const proxyResponse = await fetch(
-      `${POLY_RELAYER_URL}/proxy/${address}`,
-      {
-        headers: {
-          Accept: "application/json",
-        },
-      }
-    );
+    // Per docs: use query parameter format
+    const proxyUrl = `${POLY_RELAYER_URL}/proxy?address=${address}`;
+    console.log("[MRKT] Checking proxy at:", proxyUrl);
+
+    const proxyResponse = await fetch(proxyUrl, {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "MRKT-Trading-Platform/1.0",
+      },
+    });
 
     if (proxyResponse.status === 404) {
       // No proxy exists yet
@@ -90,20 +118,28 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(response);
     }
 
-    if (!proxyResponse.ok) {
-      throw new Error(`Proxy check failed: ${proxyResponse.status}`);
+    // Safe parse the response
+    const { data: proxyData, error: parseError } = await safeParseJson(proxyResponse);
+
+    if (parseError) {
+      throw new Error(parseError);
     }
 
-    const proxyData = await proxyResponse.json();
-    const proxyAddress = proxyData.proxy || proxyData.address || proxyData.safeAddress;
+    if (!proxyResponse.ok) {
+      const errorMsg = (proxyData as { message?: string })?.message || `Proxy check failed: ${proxyResponse.status}`;
+      throw new Error(errorMsg);
+    }
+
+    const proxyInfo = proxyData as { proxy?: string; address?: string; safeAddress?: string; deployed?: boolean; allowance?: string };
+    const proxyAddress = proxyInfo.proxy || proxyInfo.address || proxyInfo.safeAddress;
 
     const response: ApiResponse<ProxyStatus> = {
       success: true,
       data: {
-        hasProxy: true,
+        hasProxy: !!proxyAddress,
         proxyAddress,
-        isDeployed: proxyData.deployed !== false,
-        allowance: proxyData.allowance,
+        isDeployed: proxyInfo.deployed !== false,
+        allowance: proxyInfo.allowance,
       },
       timestamp: new Date().toISOString(),
     };
@@ -172,19 +208,33 @@ export async function POST(request: NextRequest) {
       const method = "POST";
       const path = "/proxy";
 
-      // Generate builder headers
-      const builderHeaders = await builderConfig?.generateBuilderHeaders(
-        method,
-        path,
-        JSON.stringify({ owner: address }),
-        timestamp
-      );
+      // Generate builder headers if config available
+      let builderHeaders: Record<string, string> = {};
+      if (builderConfig) {
+        try {
+          const headers = await builderConfig.generateBuilderHeaders(
+            method,
+            path,
+            JSON.stringify({ owner: address }),
+            timestamp
+          );
+          if (headers) {
+            builderHeaders = headers as Record<string, string>;
+          }
+        } catch (headerError) {
+          console.error("[MRKT] Builder header generation failed:", headerError);
+        }
+      }
+
+      console.log("[MRKT] Deploying proxy to:", `${POLY_RELAYER_URL}${path}`);
 
       const deployResponse = await fetch(`${POLY_RELAYER_URL}${path}`, {
         method,
         headers: {
           "Content-Type": "application/json",
-          ...(builderHeaders || {}),
+          Accept: "application/json",
+          "User-Agent": "MRKT-Trading-Platform/1.0",
+          ...builderHeaders,
         },
         body: JSON.stringify({
           owner: address,
@@ -192,14 +242,28 @@ export async function POST(request: NextRequest) {
         }),
       });
 
-      const deployData = await deployResponse.json();
+      // Safe parse the response
+      const { data: deployData, error: parseError } = await safeParseJson(deployResponse);
 
-      if (!deployResponse.ok) {
+      if (parseError) {
         const response: ApiResponse<null> = {
           success: false,
           error: {
             code: "PROXY_DEPLOY_FAILED",
-            message: deployData.message || `Deployment failed: ${deployResponse.status}`,
+            message: parseError,
+          },
+          timestamp: new Date().toISOString(),
+        };
+        return NextResponse.json(response, { status: 500 });
+      }
+
+      if (!deployResponse.ok) {
+        const errorData = deployData as { message?: string };
+        const response: ApiResponse<null> = {
+          success: false,
+          error: {
+            code: "PROXY_DEPLOY_FAILED",
+            message: errorData?.message || `Deployment failed: ${deployResponse.status}`,
             details: deployData,
           },
           timestamp: new Date().toISOString(),
@@ -208,12 +272,13 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(response, { status: deployResponse.status });
       }
 
+      const resultData = deployData as { proxy?: string; address?: string; safeAddress?: string; txHash?: string; transactionId?: string };
       const response: ApiResponse<{ proxyAddress: string; txHash?: string; transactionId?: string }> = {
         success: true,
         data: {
-          proxyAddress: deployData.proxy || deployData.address || deployData.safeAddress,
-          txHash: deployData.txHash,
-          transactionId: deployData.transactionId,
+          proxyAddress: resultData.proxy || resultData.address || resultData.safeAddress || "",
+          txHash: resultData.txHash,
+          transactionId: resultData.transactionId,
         },
         timestamp: new Date().toISOString(),
       };
