@@ -12,9 +12,9 @@ const rpcUrl = 'https://polygon-rpc.com'; // Or use Alchemy if env var present
 export const getClobClient = () => {
     const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
 
-    // For read-only access, we might not need a signer, but the SDK constructor usually expects one or a provider.
-    // We'll pass the provider.
-    return new ClobClient(rpcUrl, chainId);
+    // The first argument MUST be the CLOB API Host.
+    // We pass undefined for the signer since we only need read-only access here.
+    return new ClobClient('https://clob.polymarket.com', chainId, undefined);
 };
 
 export const POLYGON_EXPLORER = 'https://polygonscan.com';
