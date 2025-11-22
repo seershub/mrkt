@@ -28,14 +28,24 @@ const POLY_RELAYER_URL = "https://relayer-v2.polymarket.com";
 // Polygon Mainnet chain ID
 const CHAIN_ID = 137;
 
-// Remote builder signing server URL (our API endpoint)
-// Per SDK: BuilderConfig.remoteBuilderConfig.url
-// Note: SDK requires full URL (http:// or https://), not relative path
+// Remote builder signing server URL
+// Per SDK docs: BuilderConfig.remoteBuilderConfig.url
+// Uses external signing server (recommended) or fallback to local API
 const getBuilderSigningUrl = () => {
+  // Priority 1: Use external builder signing server if configured
+  const externalServer = process.env.NEXT_PUBLIC_BUILDER_SIGNING_SERVER_URL;
+  if (externalServer) {
+    // Per Polymarket docs: signing server uses /sign endpoint
+    const baseUrl = externalServer.replace(/\/$/, ""); // Remove trailing slash
+    return `${baseUrl}/sign`;
+  }
+
+  // Priority 2: Use local API endpoint
   if (typeof window !== "undefined") {
     return `${window.location.origin}/api/polymarket/builder-sign`;
   }
-  // Fallback for SSR (shouldn't be used in practice)
+
+  // Fallback for SSR
   return "https://mrkt.seershub.com/api/polymarket/builder-sign";
 };
 
