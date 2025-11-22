@@ -347,11 +347,11 @@ export default function DebugPage() {
                                 {entry.message}
                               </span>
                             </div>
-                            {entry.data && (
+                            {entry.data ? (
                               <pre className="mt-1 ml-6 p-2 bg-neutral-900 rounded text-neutral-400 overflow-x-auto text-2xs">
                                 {JSON.stringify(entry.data, null, 2)}
                               </pre>
-                            )}
+                            ) : null}
                           </div>
                         );
                       })}
