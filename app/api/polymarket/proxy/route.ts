@@ -240,9 +240,9 @@ export async function POST(request: NextRequest) {
     console.log("[MRKT] Proxy deployment result:", deployResult);
 
     // Poll for completion if needed
-    if (deployResult.transactionId) {
+    if (deployResult.transactionID) {
       const finalResult = await relayClient.pollUntilState(
-        deployResult.transactionId,
+        deployResult.transactionID,
         ["CONFIRMED", "COMPLETED"],
         "FAILED",
         30, // Max polls
@@ -259,7 +259,7 @@ export async function POST(request: NextRequest) {
       data: {
         proxyAddress: deployResult.safeAddress || deployResult.address,
         txHash: deployResult.txHash,
-        transactionId: deployResult.transactionId,
+        transactionId: deployResult.transactionID,
       },
       timestamp: new Date().toISOString(),
     };
