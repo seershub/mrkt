@@ -60,7 +60,7 @@ function LogEntryRow({ entry }: { entry: LogEntry }) {
           <span className="text-neutral-600 flex-shrink-0">[{entry.source}]</span>
         )}
         <span className="text-neutral-200 flex-1 break-all">{entry.message}</span>
-        {entry.data && (
+        {entry.data ? (
           <button
             onClick={() => setExpanded(!expanded)}
             className="text-neutral-500 hover:text-neutral-300"
@@ -71,13 +71,13 @@ function LogEntryRow({ entry }: { entry: LogEntry }) {
               <ChevronDown className="w-3.5 h-3.5" />
             )}
           </button>
-        )}
+        ) : null}
       </div>
-      {expanded && entry.data && (
+      {expanded && entry.data ? (
         <pre className="mt-1 ml-5 p-2 bg-neutral-900 rounded text-neutral-400 overflow-x-auto">
           {JSON.stringify(entry.data, null, 2)}
         </pre>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -159,11 +159,11 @@ function ApiStatus() {
             {lastApiResponse.status}
           </span>
         </div>
-        {lastApiResponse.error && (
+        {lastApiResponse.error ? (
           <div className="mt-2 p-2 bg-red-500/10 rounded text-red-400 break-all">
             {JSON.stringify(lastApiResponse.error)}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );
