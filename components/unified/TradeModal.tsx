@@ -320,7 +320,7 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
                 {/* Amount Input */}
                 <div>
                   <label className="block text-sm text-neutral-400 mb-2">
-                    Amount (USD)
+                    Amount ({market.platform === "polymarket" ? "USDC" : "USD"})
                   </label>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500">

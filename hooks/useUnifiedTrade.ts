@@ -291,6 +291,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
       const proxyAddress = await deploySafe();
 
       if (proxyAddress) {
+        // Immediately update proxyStatus
         setProxyStatus({
           hasProxy: true,
           proxyAddress,
@@ -307,11 +308,8 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         return proxyAddress;
       }
 
-      // Check if there was an error from the Safe hook
-      if (safeStatus.error) {
-        throw new Error(safeStatus.error);
-      }
-
+      // Always refresh status after deploy attempt
+      await checkSafeStatus();
       return null;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Deployment failed";
@@ -327,7 +325,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     } finally {
       setTradeState((s) => ({ ...s, isLoading: false }));
     }
-  }, [address, deploySafe, safeStatus.error, addLog]);
+  }, [address, deploySafe, checkSafeStatus, addLog]);
 
   // Approve USDC spending - gasless via Relayer (no redirect to Polymarket!)
   const approveUSDC = useCallback(

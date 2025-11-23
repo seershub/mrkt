@@ -31,16 +31,23 @@ const CHAIN_ID = 137;
 // Remote builder signing server URL
 // Per SDK docs: BuilderConfig.remoteBuilderConfig.url
 const getBuilderSigningUrl = (): string => {
-  // Priority 1: Use external builder signing server if configured
+  // Debug: Log environment variable
   const externalServer = process.env.NEXT_PUBLIC_BUILDER_SIGNING_SERVER_URL;
+  console.log("[MRKT] NEXT_PUBLIC_BUILDER_SIGNING_SERVER_URL:", externalServer);
+
+  // Priority 1: Use external builder signing server if configured
   if (externalServer) {
     const baseUrl = externalServer.replace(/\/$/, "");
-    return `${baseUrl}/sign`;
+    const url = `${baseUrl}/sign`;
+    console.log("[MRKT] Using external signing server:", url);
+    return url;
   }
 
   // Priority 2: Use local API endpoint
   if (typeof window !== "undefined") {
-    return `${window.location.origin}/api/polymarket/builder-sign`;
+    const url = `${window.location.origin}/api/polymarket/builder-sign`;
+    console.log("[MRKT] Using local signing endpoint:", url);
+    return url;
   }
 
   return "https://mrkt.seershub.com/api/polymarket/builder-sign";
