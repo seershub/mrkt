@@ -17,17 +17,36 @@ const isBuilderConfigured = Boolean(
   POLY_BUILDER_API_KEY && POLY_BUILDER_SECRET && POLY_BUILDER_PASSPHRASE
 );
 
-// Initialize BuilderConfig for HMAC signing
-function getBuilderConfig(): BuilderConfig | null {
-  if (!isBuilderConfigured) return null;
+// Rate limiting (simple in-memory)
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+const RATE_LIMIT = 20; // requests per minute
+const RATE_WINDOW = 60000; // 1 minute
 
-  return new BuilderConfig({
-    localBuilderCreds: {
-      key: POLY_BUILDER_API_KEY!,
-      secret: POLY_BUILDER_SECRET!,
-      passphrase: POLY_BUILDER_PASSPHRASE!,
-    },
-  });
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const record = rateLimitMap.get(ip);
+
+  if (!record || now > record.resetTime) {
+    rateLimitMap.set(ip, { count: 1, resetTime: now + RATE_WINDOW });
+    return true;
+  }
+
+  if (record.count >= RATE_LIMIT) {
+    return false;
+  }
+
+  record.count++;
+  return true;
+}
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders });
 }
 
 interface SignRequest {
@@ -40,17 +59,20 @@ interface SignRequest {
 // POST - Sign builder headers for client-side SDK
 export async function POST(request: NextRequest) {
   try {
-    // Verify authorization (optional - add your own auth logic)
-    const authHeader = request.headers.get("authorization");
-    // You could verify a session token here
+    // Rate limiting
+    const ip = request.ip || request.headers.get('x-forwarded-for') || 'unknown';
+    if (!checkRateLimit(ip)) {
+      return NextResponse.json(
+        { success: false, error: "Rate limit exceeded" },
+        { status: 429, headers: corsHeaders }
+      );
+    }
 
     if (!isBuilderConfigured) {
+      console.error("[MRKT] Builder credentials not configured");
       return NextResponse.json(
-        {
-          success: false,
-          error: "Builder credentials not configured",
-        },
-        { status: 503 }
+        { success: false, error: "Builder credentials not configured" },
+        { status: 503, headers: corsHeaders }
       );
     }
 
@@ -59,24 +81,18 @@ export async function POST(request: NextRequest) {
 
     if (!method || !path) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Missing method or path",
-        },
-        { status: 400 }
+        { success: false, error: "Missing method or path" },
+        { status: 400, headers: corsHeaders }
       );
     }
 
-    const builderConfig = getBuilderConfig();
-    if (!builderConfig) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Failed to initialize builder config",
-        },
-        { status: 500 }
-      );
-    }
+    const builderConfig = new BuilderConfig({
+      localBuilderCreds: {
+        key: POLY_BUILDER_API_KEY!,
+        secret: POLY_BUILDER_SECRET!,
+        passphrase: POLY_BUILDER_PASSPHRASE!,
+      },
+    });
 
     // Generate HMAC headers
     const ts = timestamp || Date.now();
@@ -87,21 +103,14 @@ export async function POST(request: NextRequest) {
       ts
     );
 
-    console.log("[MRKT] Generated builder headers for:", { method, path });
+    console.log("[MRKT] Builder headers generated for:", { method, path });
 
-    // Per SDK: Return headers object directly (not wrapped)
-    // The SDK's http-helpers post() function returns resp.data directly
-    // and expects to receive the headers object to use in requests
-    return NextResponse.json(headers);
+    return NextResponse.json(headers, { headers: corsHeaders });
   } catch (error) {
     console.error("[MRKT] Builder sign error:", error);
-
     return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : "Signing failed",
-      },
-      { status: 500 }
+      { success: false, error: error instanceof Error ? error.message : "Signing failed" },
+      { status: 500, headers: corsHeaders }
     );
   }
 }
@@ -113,6 +122,6 @@ export async function GET() {
     configured: isBuilderConfigured,
     message: isBuilderConfigured
       ? "Builder signing is available"
-      : "Builder credentials not configured",
-  });
+      : "Builder credentials not configured - check POLY_BUILDER_* env vars",
+  }, { headers: corsHeaders });
 }

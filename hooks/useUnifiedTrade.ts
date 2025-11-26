@@ -429,63 +429,88 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
     async (params: TradeParams): Promise<TradeResult> => {
       const { market, outcome, amount, side } = params;
 
-      // Ensure Safe is ready
+      // 1. Prerequisites check
       if (!safeStatus.isDeployed || !safeStatus.proxyAddress) {
-        return { success: false, error: "Safe wallet not deployed. Please enable trading first." };
-      }
-
-      // Check balance
-      if (side === "buy" && usdcBalance < amount) {
         return {
           success: false,
-          error: `Insufficient USDC balance. Have: $${usdcBalance.toFixed(2)}, Need: $${amount.toFixed(2)}`,
+          error: "Safe wallet not deployed. Please click 'Deploy Proxy Wallet' first."
         };
       }
 
-      // Check allowance - use correct target based on market type
-      const requiredAllowance = market.negRisk ? negRiskAllowance : usdcAllowance;
-      const approvalTarget = market.negRisk ? "Neg Risk Adapter" : "CTF";
+      // 2. Token ID validation
+      const tokenId = outcome.tokenId;
+      if (!tokenId || tokenId === '0' || tokenId === '') {
+        addLog({
+          level: "error",
+          message: "Invalid token ID",
+          data: { tokenId, outcome },
+          source: "trade",
+        });
+        return {
+          success: false,
+          error: "Invalid market: missing token ID. This market may not support trading yet."
+        };
+      }
+
+      // 3. Balance check
+      if (side === "buy" && usdcBalance < amount) {
+        return {
+          success: false,
+          error: `Insufficient USDC. Have: $${usdcBalance.toFixed(2)}, Need: $${amount.toFixed(2)}. Deposit USDC to your Safe wallet: ${safeStatus.proxyAddress}`,
+        };
+      }
+
+      // 4. Allowance check
+      const isNegRisk = market.negRisk ?? false;
+      const requiredAllowance = isNegRisk ? negRiskAllowance : usdcAllowance;
 
       if (side === "buy" && requiredAllowance < amount) {
-        const errorMsg = `Insufficient USDC allowance on ${approvalTarget}. Current: $${requiredAllowance.toFixed(2)}, Need: $${amount.toFixed(2)}. Please approve USDC on Polymarket first.`;
-        setTradeState((s) => ({ ...s, error: errorMsg }));
+        const targetName = isNegRisk ? "Neg Risk Adapter" : "Conditional Token Framework";
+
         addLog({
           level: "warn",
-          message: errorMsg,
+          message: `Insufficient allowance on ${targetName}`,
+          data: { requiredAllowance, amount },
           source: "trade",
-          data: { requiredAllowance, amount, approvalTarget },
         });
-        return { success: false, error: errorMsg };
+
+        // Auto-approve
+        setTradeState(s => ({ ...s, isApproving: true }));
+        const approved = await approveSafeUSDC(isNegRisk);
+        setTradeState(s => ({ ...s, isApproving: false }));
+
+        if (!approved) {
+          return {
+            success: false,
+            error: `Failed to approve USDC for ${targetName}. Please try again.`
+          };
+        }
+
+        // Wait for allowance update
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      // 5. Minimum order size check
+      const minSize = market.minOrderSize || 1;
+      if (amount < minSize) {
+        return {
+          success: false,
+          error: `Minimum order size is $${minSize}`
+        };
       }
 
       setTradeState((s) => ({ ...s, isSigning: true }));
 
       try {
-        // Get token ID from outcome
-        const tokenId = outcome.tokenId;
-        if (!tokenId) {
-          return { success: false, error: "Invalid market: missing token ID" };
-        }
-
-        // Calculate order amounts
+        // 6. Calculate order amounts
         const price = outcome.price;
         const shares = amount / price;
-        const sharesWei = parseUnits(shares.toFixed(TRADING.SHARE_DECIMALS), TRADING.SHARE_DECIMALS);
-        const costWei = parseUnits(amount.toFixed(TRADING.USDC_DECIMALS), TRADING.USDC_DECIMALS);
+        const sharesWei = parseUnits(shares.toFixed(6), 6);
+        const costWei = parseUnits(amount.toFixed(6), 6);
 
-        // Determine exchange contract based on negRisk
-        // Per docs: negRisk markets use POLYMARKET_NEG_RISK_EXCHANGE
-        const exchangeContract = market.negRisk
-          ? CONTRACTS.POLYMARKET_NEG_RISK_EXCHANGE
-          : CONTRACTS.POLYMARKET_EXCHANGE;
-
-        // Create order object
-        const salt = Math.floor(Math.random() * 1000000000);
-        const expiration = Math.floor(Date.now() / 1000) + 86400; // 24h
-
-        // Per docs: When using proxy wallet with browser wallet (MetaMask),
-        // use POLY_GNOSIS_SAFE (type 2) signature type
-        const signatureType = SIGNATURE_TYPE.POLY_GNOSIS_SAFE;
+        // 7. Create order
+        const salt = Math.floor(Math.random() * 2147483647); // Int32 max
+        const expiration = Math.floor(Date.now() / 1000) + 86400;
 
         const orderMessage = {
           salt: BigInt(salt),
@@ -499,20 +524,25 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
           nonce: BigInt(0),
           feeRateBps: BigInt(0),
           side: side === "buy" ? 0 : 1,
-          signatureType: signatureType,
+          signatureType: 2, // POLY_GNOSIS_SAFE for browser wallets
         };
 
-        // Get correct domain for this market type
-        const domain = getPolymarketDomain(market.negRisk ?? false);
+        const domain = getPolymarketDomain(isNegRisk);
 
         addLog({
           level: "debug",
-          message: "Signing EIP-712 order",
+          message: "Signing order",
+          data: {
+            tokenId,
+            amount,
+            side,
+            isNegRisk,
+            domain: domain.verifyingContract
+          },
           source: "trade",
-          data: { orderMessage, domain, exchangeContract },
         });
 
-        // Sign the order with correct domain
+        // 8. Sign
         const signature = await signTypedDataAsync({
           domain,
           types: ORDER_TYPES,
@@ -522,14 +552,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
 
         setTradeState((s) => ({ ...s, isSigning: false, isSubmitting: true }));
 
-        addLog({
-          level: "info",
-          message: "Submitting signed order to Polymarket",
-          source: "trade",
-        });
-
-        // Build the signed order object matching SDK format
-        // Per docs: signatureType must match wallet type
+        // 9. Submit
         const signedOrder = {
           salt: salt.toString(),
           maker: safeStatus.proxyAddress!,
@@ -542,25 +565,21 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
           nonce: "0",
           feeRateBps: "0",
           side: side === "buy" ? 0 : 1,
-          signatureType: signatureType, // Type 2 for POLY_GNOSIS_SAFE
+          signatureType: 2,
           signature: signature,
         };
 
-        // Submit to our API (which forwards to Polymarket with builder attribution via SDK)
         const response = await fetch("/api/polymarket/order", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             signedOrder,
             orderType: "GTC",
-            negRisk: market.negRisk || false,
+            negRisk: isNegRisk,
           }),
         });
 
-        const result = (await response.json()) as ApiResponse<{
-          orderId: string;
-          status: string;
-        }>;
+        const result = await response.json();
 
         if (!result.success) {
           throw new Error(result.error?.message || "Order submission failed");
@@ -568,21 +587,21 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
 
         addLog({
           level: "success",
-          message: `Polymarket order submitted: ${result.data?.orderId}`,
+          message: `Order placed: ${result.data?.orderId}`,
           source: "trade",
-          data: result.data,
         });
 
         return {
           success: true,
           orderId: result.data?.orderId,
         };
+
       } catch (error) {
         const message = error instanceof Error ? error.message : "Trade failed";
 
         addLog({
           level: "error",
-          message: `Polymarket trade failed: ${message}`,
+          message: `Trade failed: ${message}`,
           source: "trade",
         });
 
@@ -591,7 +610,7 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
         setTradeState((s) => ({ ...s, isSigning: false, isSubmitting: false }));
       }
     },
-    [safeStatus, usdcBalance, usdcAllowance, negRiskAllowance, address, signTypedDataAsync, addLog]
+    [safeStatus, usdcBalance, usdcAllowance, negRiskAllowance, address, signTypedDataAsync, approveSafeUSDC, addLog]
   );
 
   // Execute Kalshi trade

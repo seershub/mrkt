@@ -119,47 +119,61 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
       return;
     }
 
-    try {
-      const builderSigningUrl = getBuilderSigningUrl();
-      console.log("[MRKT] ========== RelayClient Init ==========");
-      console.log("[MRKT] Builder signing URL:", builderSigningUrl);
-      console.log("[MRKT] WalletClient account:", walletClient.account?.address);
-      console.log("[MRKT] WalletClient chain:", walletClient.chain?.id);
+    const initializeClient = async () => {
+      try {
+        const builderSigningUrl = getBuilderSigningUrl();
+        console.log("[MRKT] ========== RelayClient Init ==========");
+        console.log("[MRKT] Builder signing URL:", builderSigningUrl);
+        console.log("[MRKT] WalletClient account:", walletClient.account?.address);
+        console.log("[MRKT] WalletClient chain:", walletClient.chain?.id);
 
-      const builderConfig = new BuilderConfig({
-        remoteBuilderConfig: {
-          url: builderSigningUrl,
-        },
-      });
-      console.log("[MRKT] BuilderConfig created");
+        const builderConfig = new BuilderConfig({
+          remoteBuilderConfig: {
+            url: builderSigningUrl,
+          },
+        });
+        console.log("[MRKT] BuilderConfig created");
 
-      const client = new RelayClient(
-        POLY_RELAYER_URL,
-        CHAIN_ID,
-        walletClient,
-        builderConfig
-      );
+        const client = new RelayClient(
+          POLY_RELAYER_URL,
+          CHAIN_ID,
+          walletClient,
+          builderConfig
+        );
 
-      relayClientRef.current = client;
-      setIsClientReady(true);
-      console.log("[MRKT] RelayClient READY!");
-      console.log("[MRKT] =====================================");
+        // Health check
+        try {
+          const testResponse = await fetch(`${POLY_RELAYER_URL}/health`);
+          if (!testResponse.ok) {
+            console.warn("[MRKT] Relayer health check failed, but continuing...");
+          }
+        } catch (e) {
+          console.warn("[MRKT] Relayer health check error:", e);
+        }
 
-      addLog({
-        level: "success",
-        message: "RelayClient initialized successfully",
-        source: "safe",
-      });
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      console.error("[MRKT] RelayClient init FAILED:", errorMsg, error);
+        relayClientRef.current = client;
+        setIsClientReady(true);
+        console.log("[MRKT] RelayClient READY!");
+        console.log("[MRKT] =====================================");
 
-      addLog({
-        level: "error",
-        message: `RelayClient init failed: ${errorMsg}`,
-        source: "safe",
-      });
-    }
+        addLog({
+          level: "success",
+          message: "RelayClient initialized successfully",
+          source: "safe",
+        });
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : "Unknown error";
+        console.error("[MRKT] RelayClient init FAILED:", errorMsg, error);
+
+        addLog({
+          level: "error",
+          message: `RelayClient init failed: ${errorMsg}`,
+          source: "safe",
+        });
+      }
+    };
+
+    initializeClient();
   }, [walletClient, isOnPolygon, chain, addLog]);
 
   // ============================================
@@ -275,75 +289,94 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     setIsDeploying(true);
     setSafeStatus((s) => ({ ...s, error: null }));
 
-    try {
-      console.log("[MRKT] Calling relayClient.deploy()...");
-      addLog({
-        level: "info",
-        message: "Deploying Safe wallet... Please sign in MetaMask",
-        source: "safe",
-      });
+    const maxRetries = 3;
 
-      // This should trigger MetaMask signature request
-      const response = await relayClientRef.current.deploy();
-      console.log("[MRKT] Deploy response:", response);
-
-      addLog({
-        level: "info",
-        message: `Deployment submitted: ${response.transactionID}`,
-        source: "safe",
-      });
-
-      let transaction = await response.wait();
-
-      if (!transaction && response.transactionID) {
-        console.log("[MRKT] Polling for transaction state...");
-        transaction = await relayClientRef.current.pollUntilState(
-          response.transactionID,
-          [RelayerTransactionState.STATE_CONFIRMED, RelayerTransactionState.STATE_MINED],
-          RelayerTransactionState.STATE_FAILED,
-          30,
-          2000
-        );
-      }
-
-      const proxyAddress = transaction?.proxyAddress;
-      console.log("[MRKT] Deploy complete. Proxy:", proxyAddress);
-
-      if (proxyAddress) {
-        setSafeStatus({
-          isDeployed: true,
-          proxyAddress,
-          isLoading: false,
-          error: null,
-        });
-
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`[MRKT] Calling relayClient.deploy() (attempt ${attempt}/${maxRetries})...`);
         addLog({
-          level: "success",
-          message: `Safe deployed: ${proxyAddress}`,
+          level: "info",
+          message: `Deploying Safe wallet (attempt ${attempt}/${maxRetries})... Please sign in MetaMask`,
           source: "safe",
         });
 
-        return proxyAddress;
+        // This should trigger MetaMask signature request
+        const response = await relayClientRef.current.deploy();
+        console.log("[MRKT] Deploy response:", response);
+
+        addLog({
+          level: "info",
+          message: `Deployment submitted: ${response.transactionID}`,
+          source: "safe",
+        });
+
+        let transaction = await response.wait();
+
+        if (!transaction && response.transactionID) {
+          console.log("[MRKT] Polling for transaction state...");
+          transaction = await relayClientRef.current.pollUntilState(
+            response.transactionID,
+            [RelayerTransactionState.STATE_CONFIRMED, RelayerTransactionState.STATE_MINED],
+            RelayerTransactionState.STATE_FAILED,
+            60, // Increased from 30
+            3000 // Increased from 2000
+          );
+        }
+
+        const proxyAddress = transaction?.proxyAddress;
+        console.log("[MRKT] Deploy complete. Proxy:", proxyAddress);
+
+        if (proxyAddress) {
+          setSafeStatus({
+            isDeployed: true,
+            proxyAddress,
+            isLoading: false,
+            error: null,
+          });
+
+          addLog({
+            level: "success",
+            message: `Safe deployed: ${proxyAddress}`,
+            source: "safe",
+          });
+
+          setIsDeploying(false);
+          return proxyAddress;
+        }
+
+        // If no proxy address, refresh status
+        await checkSafeStatus();
+        if (safeStatus.proxyAddress) {
+          setIsDeploying(false);
+          return safeStatus.proxyAddress;
+        }
+
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Deployment failed";
+
+        if (attempt === maxRetries) {
+          console.error("[MRKT] Deploy error:", message, error);
+          setSafeStatus((s) => ({ ...s, error: message }));
+
+          addLog({
+            level: "error",
+            message: `Deploy failed after ${maxRetries} attempts: ${message}`,
+            source: "safe",
+          });
+        } else {
+          addLog({
+            level: "warn",
+            message: `Deploy attempt ${attempt} failed, retrying...`,
+            source: "safe",
+          });
+          await new Promise(r => setTimeout(r, 2000 * attempt));
+        }
       }
-
-      await checkSafeStatus();
-      return safeStatus.proxyAddress || null;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Deployment failed";
-      console.error("[MRKT] Deploy error:", message, error);
-      setSafeStatus((s) => ({ ...s, error: message }));
-
-      addLog({
-        level: "error",
-        message: `Deploy failed: ${message}`,
-        source: "safe",
-      });
-
-      return null;
-    } finally {
-      setIsDeploying(false);
-      console.log("[MRKT] =====================================");
     }
+
+    setIsDeploying(false);
+    console.log("[MRKT] =====================================");
+    return null;
   }, [address, isOnPolygon, chain, isClientReady, addLog, checkSafeStatus, safeStatus.proxyAddress]);
 
   // ============================================

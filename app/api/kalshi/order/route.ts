@@ -14,7 +14,24 @@ export const runtime = "nodejs"; // Need Node.js for crypto
 // Kalshi API configuration
 const KALSHI_URL = API_ENDPOINTS.KALSHI.BASE;
 const KALSHI_API_KEY_ID = process.env.KALSHI_API_KEY_ID;
-const KALSHI_PRIVATE_KEY = process.env.KALSHI_PRIVATE_KEY?.replace(/\\n/g, "\n");
+const KALSHI_PRIVATE_KEY = (() => {
+  let key = process.env.KALSHI_PRIVATE_KEY;
+  if (!key) return undefined;
+
+  // Handle escaped newlines
+  key = key.replace(/\\n/g, '\n');
+
+  // Remove surrounding quotes if present
+  key = key.replace(/^["']|["']$/g, '');
+
+  // Ensure proper PEM format
+  if (!key.includes('-----BEGIN')) {
+    console.error("[MRKT] Kalshi private key is not in PEM format");
+    return undefined;
+  }
+
+  return key;
+})();
 
 // Check if credentials are configured
 const isConfigured = Boolean(KALSHI_API_KEY_ID && KALSHI_PRIVATE_KEY);
@@ -42,23 +59,29 @@ function generateSignature(
   path: string
 ): string {
   if (!KALSHI_PRIVATE_KEY) {
-    throw new Error("Kalshi private key not configured");
+    throw new Error("Kalshi private key not configured or invalid");
   }
 
   // Strip query params from path for signing
   const pathWithoutQuery = path.split("?")[0];
+  const fullPath = `/trade-api/v2${pathWithoutQuery}`;
 
   // Message format: timestamp + method + path (without query params)
-  const message = `${timestampMs}${method}${pathWithoutQuery}`;
+  const message = `${timestampMs}${method}${fullPath}`;
 
-  // Use RSA-PSS with SHA256 (correct algorithm per Kalshi docs)
-  const signature = crypto.sign("sha256", Buffer.from(message), {
-    key: KALSHI_PRIVATE_KEY,
-    padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-    saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
-  });
+  try {
+    // Use RSA-PSS with SHA256 (correct algorithm per Kalshi docs)
+    const signature = crypto.sign("sha256", Buffer.from(message), {
+      key: KALSHI_PRIVATE_KEY,
+      padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+      saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
+    });
 
-  return signature.toString("base64");
+    return signature.toString("base64");
+  } catch (error) {
+    console.error("[MRKT] Signature generation failed:", error);
+    throw new Error("Failed to generate signature - check private key format");
+  }
 }
 
 // Make authenticated request to Kalshi API

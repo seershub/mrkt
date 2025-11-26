@@ -1,19 +1,20 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, JetBrains_Mono } from "next/font/google";
+// import { Inter, JetBrains_Mono } from "next/font/google";
 import { Providers } from "@/components/providers/Providers";
 import "./globals.css";
 
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-inter",
-  display: "swap",
-});
+// Fonts loaded via CSS imports in globals.css instead
+// const inter = Inter({
+//   subsets: ["latin"],
+//   variable: "--font-inter",
+//   display: "swap",
+// });
 
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
-  variable: "--font-mono",
-  display: "swap",
-});
+// const jetbrainsMono = JetBrains_Mono({
+//   subsets: ["latin"],
+//   variable: "--font-mono",
+//   display: "swap",
+// });
 
 export const metadata: Metadata = {
   title: "MRKT - Sports Prediction Markets",
@@ -64,7 +65,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark" suppressHydrationWarning>
       <body
-        className={`${inter.variable} ${jetbrainsMono.variable} font-sans antialiased bg-background text-foreground min-h-screen`}
+        className="font-sans antialiased bg-background text-foreground min-h-screen"
       >
         <Providers>{children}</Providers>
       </body>

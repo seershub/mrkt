@@ -91,6 +91,36 @@ const config: Config = {
           950: "#0a0a0a",
         },
 
+        // Terminal Dark Theme
+        terminal: {
+          bg: '#0A0B0D',
+          card: '#12141A',
+          hover: '#1E2028',
+        },
+        gold: {
+          DEFAULT: '#D4AF37',
+          50: '#FDF8E8',
+          100: '#FCF0CC',
+          500: '#D4AF37',
+          600: '#B8941F',
+        },
+        emerald: {
+          400: '#34D399',
+          500: '#10B981',
+        },
+        crimson: {
+          400: '#F87171',
+          500: '#EF4444',
+        },
+        poly: {
+          DEFAULT: '#8B5CF6',
+          light: '#A78BFA',
+        },
+        kalshi: {
+          DEFAULT: '#3B82F6',
+          light: '#60A5FA',
+        },
+
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
@@ -130,6 +160,8 @@ const config: Config = {
       },
 
       fontFamily: {
+        display: ["var(--font-display)", "Instrument Serif", "Georgia", "serif"],
+        body: ["var(--font-body)", "DM Sans", "-apple-system", "sans-serif"],
         sans: ["var(--font-inter)", "Inter", "system-ui", "sans-serif"],
         mono: ["var(--font-mono)", "JetBrains Mono", "monospace"],
       },
@@ -151,6 +183,7 @@ const config: Config = {
         "fade-in": "fadeIn 0.2s ease-out",
         "scale-in": "scaleIn 0.2s ease-out",
         "spin-slow": "spin 3s linear infinite",
+        "gradient": "gradient-shift 3s ease infinite",
       },
 
       keyframes: {
@@ -169,6 +202,10 @@ const config: Config = {
         scaleIn: {
           "0%": { transform: "scale(0.95)", opacity: "0" },
           "100%": { transform: "scale(1)", opacity: "1" },
+        },
+        "gradient-shift": {
+          "0%, 100%": { backgroundPosition: "0% 50%" },
+          "50%": { backgroundPosition: "100% 50%" },
         },
       },
 
