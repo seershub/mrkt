@@ -180,33 +180,37 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
   // Check Safe Deployment Status
   // ============================================
   const checkSafeStatus = useCallback(async (): Promise<boolean> => {
-    if (!address) return false;
+    if (!address) {
+      console.log("[MRKT] ❌ checkSafeStatus: No address");
+      return false;
+    }
 
+    console.log("[MRKT] 🔍 Checking Safe status for address:", address);
     setSafeStatus((s) => ({ ...s, isLoading: true, error: null }));
 
     try {
-      console.log("[MRKT] Checking Safe at:", `${POLY_RELAYER_URL}/deployed?address=${address}`);
+      const deployedUrl = `${POLY_RELAYER_URL}/deployed?address=${address}`;
+      console.log("[MRKT] 📡 Requesting:", deployedUrl);
 
-      const response = await fetch(
-        `${POLY_RELAYER_URL}/deployed?address=${address}`,
-        {
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/json",
-          },
-        }
-      );
+      const response = await fetch(deployedUrl, {
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+      });
 
       if (!response.ok) {
         throw new Error(`Relayer returned ${response.status}`);
       }
 
       const data = await response.json();
-      console.log("[MRKT] Safe status response:", data);
+      console.log("[MRKT] 📥 Safe status response:", data);
+
       const isDeployed = data.deployed === true;
 
       let proxyAddress: string | undefined;
       if (isDeployed) {
+        console.log("[MRKT] ✅ Safe IS deployed! Getting proxy address...");
         try {
           const nonceResponse = await fetch(
             `${POLY_RELAYER_URL}/nonce?address=${address}&signerType=EOA`,
@@ -215,18 +219,25 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
           if (nonceResponse.ok) {
             const nonceData = await nonceResponse.json();
             proxyAddress = nonceData.proxyAddress || data.proxyAddress;
+            console.log("[MRKT] 🎯 Proxy address from nonce:", proxyAddress);
           }
-        } catch {
+        } catch (e) {
           proxyAddress = data.proxyAddress;
+          console.log("[MRKT] 🎯 Proxy address from deployed endpoint:", proxyAddress);
         }
+      } else {
+        console.log("[MRKT] ⚠️  Safe NOT deployed yet for this address");
       }
 
-      setSafeStatus({
+      const finalStatus = {
         isDeployed,
         proxyAddress,
         isLoading: false,
         error: null,
-      });
+      };
+
+      console.log("[MRKT] 💾 Setting Safe status:", finalStatus);
+      setSafeStatus(finalStatus);
 
       addLog({
         level: isDeployed ? "success" : "info",
@@ -237,6 +248,8 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
       return isDeployed;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to check Safe status";
+      console.error("[MRKT] ❌ Safe check error:", message, error);
+
       setSafeStatus({
         isDeployed: false,
         proxyAddress: undefined,

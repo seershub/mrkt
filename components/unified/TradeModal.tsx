@@ -94,7 +94,17 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
   const hasInsufficientBalance = side === "buy" && amount > availableBalance;
 
   // Determine if proxy deployment is needed (Polymarket only)
-  const needsProxyDeployment = market.platform === "polymarket" && proxyStatus?.needsDeployment;
+  // Only show deployment warning if we've confirmed the proxy is NOT deployed
+  const needsProxyDeployment =
+    market.platform === "polymarket" &&
+    proxyStatus !== null &&
+    !proxyStatus.isDeployed &&
+    proxyStatus.needsDeployment;
+
+  // Show proxy status if we're still checking (Polymarket only)
+  const isCheckingProxy =
+    market.platform === "polymarket" &&
+    (proxyStatus === null || tradeState.isCheckingProxy);
 
   // Check if any loading state is active
   const isLoading =
@@ -280,6 +290,37 @@ export function TradeModal({ market, outcome, isOpen, onClose }: TradeModalProps
                     {formatCurrency(availableBalance)}
                   </span>
                 </div>
+
+                {/* Checking Proxy Status (Polymarket only) */}
+                {isCheckingProxy && (
+                  <div className="p-3 bg-neutral-800/50 border border-neutral-700 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-brand-400" />
+                      <p className="text-sm text-neutral-400">
+                        Checking proxy wallet status...
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Proxy Wallet Already Deployed (Polymarket only) */}
+                {market.platform === "polymarket" &&
+                  proxyStatus?.isDeployed &&
+                  proxyStatus.proxyAddress && (
+                    <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+                      <div className="flex items-start gap-2">
+                        <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                          <p className="text-sm font-medium text-emerald-400">
+                            Proxy Wallet Ready
+                          </p>
+                          <p className="text-xs text-emerald-400/80 mt-1 font-mono">
+                            {proxyStatus.proxyAddress.slice(0, 6)}...{proxyStatus.proxyAddress.slice(-4)}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                 {/* Proxy Deployment Warning (Polymarket only) */}
                 {needsProxyDeployment && (

@@ -109,18 +109,48 @@ export class KalshiClient {
 
   // Make public (unauthenticated) request - Edge compatible
   private async publicRequest<T>(path: string): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      headers: {
-        Accept: "application/json",
-      },
-      next: { revalidate: 60 },
-    });
+    const url = `${this.baseUrl}${path}`;
+    console.log("[MRKT] Kalshi API request:", url);
 
-    if (!response.ok) {
-      throw new Error(`Kalshi API error: ${response.status}`);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "MRKT/1.0",
+        },
+        next: { revalidate: 60 },
+      });
+
+      console.log("[MRKT] Kalshi response status:", response.status);
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "No error details");
+        console.error("[MRKT] Kalshi API error:", {
+          status: response.status,
+          statusText: response.statusText,
+          url,
+          error: errorText,
+        });
+        throw new Error(`Kalshi API ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log("[MRKT] Kalshi data received:", {
+        path,
+        hasEvents: !!data.events,
+        eventsCount: data.events?.length || 0,
+        hasMarkets: !!data.markets,
+        marketsCount: data.markets?.length || 0,
+      });
+
+      return data as T;
+    } catch (error) {
+      console.error("[MRKT] Kalshi request failed:", {
+        url,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
     }
-
-    return response.json() as Promise<T>;
   }
 
   // Check if authenticated mode is available (always false in Edge)
@@ -133,22 +163,44 @@ export class KalshiClient {
   // Get sports events
   async getSportsEvents(): Promise<UnifiedMarket[]> {
     try {
+      console.log("[MRKT] Fetching Kalshi sports events...");
+
       // Kalshi's public events endpoint
-      const data = await this.publicRequest<{ events: KalshiEvent[] }>(
-        "/events?status=open&with_nested_markets=true&category=Sports"
+      const data = await this.publicRequest<{ events: KalshiEvent[]; cursor?: string }>(
+        "/events?status=open&with_nested_markets=true&category=Sports&limit=200"
       );
 
       const markets: UnifiedMarket[] = [];
 
-      for (const event of data.events || []) {
-        for (const market of event.markets || []) {
+      if (!data.events || data.events.length === 0) {
+        console.warn("[MRKT] No Kalshi events found in response");
+        return [];
+      }
+
+      console.log("[MRKT] Processing", data.events.length, "Kalshi events");
+
+      for (const event of data.events) {
+        if (!event.markets || event.markets.length === 0) {
+          console.warn("[MRKT] Event has no markets:", event.event_ticker);
+          continue;
+        }
+
+        for (const market of event.markets) {
           markets.push(transformKalshiMarket(market, event));
         }
       }
 
+      console.log("[MRKT] Successfully transformed", markets.length, "Kalshi markets");
       return markets;
     } catch (error) {
       console.error("[MRKT] Kalshi getSportsEvents error:", error);
+      console.error("[MRKT] This may be due to:");
+      console.error("  - Network/CORS issues");
+      console.error("  - Kalshi API being down");
+      console.error("  - Rate limiting");
+      console.error("  - Invalid category name (case-sensitive)");
+
+      // Return empty array to not break the UI
       return [];
     }
   }

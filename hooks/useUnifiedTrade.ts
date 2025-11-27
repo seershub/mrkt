@@ -220,20 +220,33 @@ export function useUnifiedTrade(): UseUnifiedTradeReturn {
 
   // Sync proxyStatus with safeStatus for backwards compatibility
   useEffect(() => {
+    console.log("[MRKT] 🔄 Syncing proxyStatus from safeStatus:", {
+      isDeployed: safeStatus.isDeployed,
+      proxyAddress: safeStatus.proxyAddress,
+      isLoading: safeStatus.isLoading,
+      error: safeStatus.error,
+    });
+
     if (safeStatus.isDeployed && safeStatus.proxyAddress) {
-      setProxyStatus({
+      const newStatus = {
         hasProxy: true,
         proxyAddress: safeStatus.proxyAddress,
         isDeployed: true,
         needsDeployment: false,
-      });
+      };
+      console.log("[MRKT] ✅ ProxyStatus: Safe IS deployed", newStatus);
+      setProxyStatus(newStatus);
     } else if (!safeStatus.isLoading) {
-      setProxyStatus({
+      const newStatus = {
         hasProxy: false,
         proxyAddress: undefined,
         isDeployed: false,
         needsDeployment: true,
-      });
+      };
+      console.log("[MRKT] ⚠️  ProxyStatus: Safe NOT deployed", newStatus);
+      setProxyStatus(newStatus);
+    } else {
+      console.log("[MRKT] ⏳ ProxyStatus: Still loading, not updating yet");
     }
   }, [safeStatus]);
 
