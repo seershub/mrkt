@@ -138,7 +138,7 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
         const client = new RelayClient(
           POLY_RELAYER_URL,
           CHAIN_ID,
-          signer,
+          signer as any,
           builderConfig
         );
 
