@@ -1,174 +1,99 @@
 "use client";
 
-import { motion } from "framer-motion";
-import { Clock, TrendingUp, Droplet, ExternalLink } from "lucide-react";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { UnifiedMarket } from "@/types";
+import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { cn, formatCurrency, formatCompact, formatRelativeTime } from "@/lib/utils";
 import { SPORT_CATEGORIES } from "@/lib/constants";
-import { UnifiedMarket, MarketOutcome } from "@/types";
+import { cn } from "@/lib/utils";
+import { motion } from "framer-motion";
+import Image from "next/image";
+import Link from "next/link";
 
 interface MarketCardProps {
   market: UnifiedMarket;
-  onSelect?: (market: UnifiedMarket, outcome: MarketOutcome) => void;
-  compact?: boolean;
 }
 
-// Outcome button component
-function OutcomeButton({
-  outcome,
-  isYes,
-  onClick,
-}: {
-  outcome: MarketOutcome;
-  isYes: boolean;
-  onClick: () => void;
-}) {
-  const probability = Math.round(outcome.price * 100);
-
-  return (
-    <Button
-      variant="outline"
-      onClick={onClick}
-      className={cn(
-        "flex-1 flex flex-col items-center gap-1 h-auto py-3 border-2 transition-all",
-        isYes
-          ? "hover:bg-success-500/10 hover:border-success-500/50"
-          : "hover:bg-danger-500/10 hover:border-danger-500/50"
-      )}
-    >
-      <span
-        className={cn(
-          "text-lg font-bold tabular-nums",
-          isYes ? "text-success-400" : "text-danger-400"
-        )}
-      >
-        {probability}¢
-      </span>
-      <span className="text-xs text-neutral-400 uppercase tracking-wide">
-        {outcome.name}
-      </span>
-    </Button>
-  );
-}
-
-export function MarketCard({ market, onSelect, compact = false }: MarketCardProps) {
+export function MarketCard({ market }: MarketCardProps) {
   const category = SPORT_CATEGORIES[market.category] || SPORT_CATEGORIES.other;
+  const yesOutcome = market.outcomes.find((o) => o.id.includes("yes"));
+  const noOutcome = market.outcomes.find((o) => o.id.includes("no"));
 
-  // Get YES and NO outcomes (or first two outcomes)
-  const yesOutcome = market.outcomes.find(
-    (o) => o.name.toLowerCase() === "yes"
-  ) || market.outcomes[0];
-  const noOutcome = market.outcomes.find(
-    (o) => o.name.toLowerCase() === "no"
-  ) || market.outcomes[1];
-
-  const handleOutcomeClick = (outcome: MarketOutcome) => {
-    if (onSelect) {
-      onSelect(market, outcome);
-    }
-  };
+  const yesPrice = yesOutcome ? Math.round(yesOutcome.price * 100) : 50;
+  const noPrice = noOutcome ? Math.round(noOutcome.price * 100) : 50;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      whileHover={{ y: -2 }}
-      transition={{ duration: 0.2 }}
-    >
-      <Card className="overflow-hidden card-hover group">
-        <CardHeader className="pb-2">
-          {/* Header row with category and status */}
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Badge variant="secondary" className="font-normal">
+    <Link href={`/market/${market.id}`}>
+      <motion.div
+        whileHover={{ y: -5 }}
+        transition={{ duration: 0.2 }}
+      >
+        <Card className="h-full overflow-hidden border-white/10 bg-white/5 backdrop-blur-sm hover:border-white/20 hover:bg-white/10 transition-all duration-300 group">
+          {/* Header Image/Gradient */}
+          <div className="h-32 relative overflow-hidden">
+            <div
+              className="absolute inset-0 opacity-20 group-hover:opacity-30 transition-opacity duration-500"
+              style={{ backgroundColor: category.color }}
+            />
+            <div className="absolute inset-0 bg-gradient-to-t from-background to-transparent" />
+
+            <div className="absolute top-3 left-3 flex gap-2">
+              <Badge variant="secondary" className="bg-black/40 backdrop-blur-md border-white/10 text-white">
                 <span className="mr-1">{category.icon}</span>
                 {category.name}
               </Badge>
-              {market.isLive && (
-                <Badge variant="live" className="gap-1">
-                  <span className="w-1.5 h-1.5 bg-success-400 rounded-full animate-pulse" />
-                  LIVE
+              {market.platform === "polymarket" && (
+                <Badge variant="outline" className="bg-blue-500/10 text-blue-400 border-blue-500/20">
+                  Polymarket
+                </Badge>
+              )}
+              {market.platform === "kalshi" && (
+                <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/20">
+                  Kalshi
                 </Badge>
               )}
             </div>
-            <div className="flex items-center gap-2 text-xs text-neutral-500">
-              <Clock className="w-3.5 h-3.5" />
-              {formatRelativeTime(market.endDate)}
-            </div>
           </div>
 
-          {/* Title */}
-          <h3
-            className={cn(
-              "font-semibold text-neutral-100 leading-tight mt-2",
-              compact ? "text-sm line-clamp-2" : "text-base line-clamp-3"
-            )}
-          >
-            {market.title}
-          </h3>
+          {/* Content */}
+          <div className="p-5 -mt-12 relative z-10">
+            <h3 className="text-lg font-semibold leading-tight mb-2 line-clamp-2 min-h-[3rem] text-white group-hover:text-blue-200 transition-colors">
+              {market.title}
+            </h3>
 
-          {/* Platform indicator */}
-          <div className="flex items-center gap-1 mt-1">
-            <span
-              className={cn(
-                "text-2xs font-medium px-1.5 py-0.5 rounded",
-                market.platform === "polymarket"
-                  ? "bg-purple-500/20 text-purple-400"
-                  : "bg-blue-500/20 text-blue-400"
-              )}
-            >
-              {market.platform === "polymarket" ? "Polymarket" : "Kalshi"}
-            </span>
-          </div>
-        </CardHeader>
-
-        <CardContent className="pt-2">
-          {/* Outcome buttons */}
-          {yesOutcome && noOutcome && (
-            <div className="flex gap-2 mb-3">
-              <OutcomeButton
-                outcome={yesOutcome}
-                isYes={true}
-                onClick={() => handleOutcomeClick(yesOutcome)}
-              />
-              <OutcomeButton
-                outcome={noOutcome}
-                isYes={false}
-                onClick={() => handleOutcomeClick(noOutcome)}
-              />
+            {/* Outcomes */}
+            <div className="grid grid-cols-2 gap-3 mt-4">
+              <Button
+                variant="outline"
+                className="h-12 flex justify-between items-center bg-green-500/5 border-green-500/20 hover:bg-green-500/10 hover:border-green-500/40 group/yes"
+              >
+                <span className="text-green-400 font-medium">Yes</span>
+                <span className="text-lg font-bold text-white group-hover/yes:text-green-300">
+                  {yesPrice}%
+                </span>
+              </Button>
+              <Button
+                variant="outline"
+                className="h-12 flex justify-between items-center bg-red-500/5 border-red-500/20 hover:bg-red-500/10 hover:border-red-500/40 group/no"
+              >
+                <span className="text-red-400 font-medium">No</span>
+                <span className="text-lg font-bold text-white group-hover/no:text-red-300">
+                  {noPrice}%
+                </span>
+              </Button>
             </div>
-          )}
 
-          {/* Stats row */}
-          <div className="flex items-center justify-between text-xs text-neutral-500">
-            <div className="flex items-center gap-3">
-              <span className="flex items-center gap-1">
-                <TrendingUp className="w-3.5 h-3.5" />
-                {formatCompact(market.volume)} vol
-              </span>
-              <span className="flex items-center gap-1">
-                <Droplet className="w-3.5 h-3.5" />
-                {formatCompact(market.liquidity)} liq
-              </span>
+            {/* Footer */}
+            <div className="flex justify-between items-center mt-4 text-xs text-muted-foreground">
+              <div className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                <span>Vol: ${(market.volume || 0).toLocaleString()}</span>
+              </div>
+              <span>{new Date(market.endDate).toLocaleDateString()}</span>
             </div>
-            <a
-              href={
-                market.platform === "polymarket"
-                  ? `https://polymarket.com/event/${market.slug || market.platformId}`
-                  : `https://kalshi.com/markets/${market.platformId}`
-              }
-              target="_blank"
-              rel="noopener noreferrer"
-              className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-brand-400"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
           </div>
-        </CardContent>
-      </Card>
-    </motion.div>
+        </Card>
+      </motion.div>
+    </Link>
   );
 }

@@ -7,7 +7,8 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import { useAccount, useWalletClient } from "wagmi";
+import { useAccount } from "wagmi";
+import { useEthersSigner } from "./useEthersSigner";
 import {
   RelayClient,
   SafeTransaction,
@@ -80,7 +81,7 @@ interface UsePolymarketSafeReturn {
 
 export function usePolymarketSafe(): UsePolymarketSafeReturn {
   const { address, isConnected, chain } = useAccount();
-  const { data: walletClient } = useWalletClient();
+  const signer = useEthersSigner({ chainId: CHAIN_ID });
   const addLog = useDebugStore((s) => s.addLog);
 
   // State
@@ -108,8 +109,8 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     relayClientRef.current = null;
     setIsClientReady(false);
 
-    if (!walletClient) {
-      console.log("[MRKT] RelayClient: Waiting for walletClient...");
+    if (!signer) {
+      console.log("[MRKT] RelayClient: Waiting for signer...");
       return;
     }
 
@@ -124,8 +125,8 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
         const builderSigningUrl = getBuilderSigningUrl();
         console.log("[MRKT] ========== RelayClient Init ==========");
         console.log("[MRKT] Builder signing URL:", builderSigningUrl);
-        console.log("[MRKT] WalletClient account:", walletClient.account?.address);
-        console.log("[MRKT] WalletClient chain:", walletClient.chain?.id);
+        const signerAddress = await signer.getAddress();
+        console.log("[MRKT] Signer account:", signerAddress);
 
         const builderConfig = new BuilderConfig({
           remoteBuilderConfig: {
@@ -137,7 +138,7 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
         const client = new RelayClient(
           POLY_RELAYER_URL,
           CHAIN_ID,
-          walletClient,
+          signer,
           builderConfig
         );
 
@@ -174,7 +175,7 @@ export function usePolymarketSafe(): UsePolymarketSafeReturn {
     };
 
     initializeClient();
-  }, [walletClient, isOnPolygon, chain, addLog]);
+  }, [signer, isOnPolygon, chain, addLog]);
 
   // ============================================
   // Check Safe Deployment Status

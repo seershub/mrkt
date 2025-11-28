@@ -165,10 +165,32 @@ export class KalshiClient {
     try {
       console.log("[MRKT] Fetching Kalshi sports events...");
 
-      // Kalshi's public events endpoint
-      const data = await this.publicRequest<{ events: KalshiEvent[]; cursor?: string }>(
-        "/events?status=open&with_nested_markets=true&category=Sports&limit=200"
-      );
+      // Use local proxy to avoid CORS
+      const isBrowser = typeof window !== "undefined";
+      const baseUrl = isBrowser ? "/api/kalshi/events" : "/events"; // Proxy path vs direct path suffix
+
+      let url = "";
+      if (isBrowser) {
+        url = `${window.location.origin}/api/kalshi/events?limit=200`;
+      } else {
+        // Server-side can call direct
+        url = `${this.baseUrl}/events?status=open&with_nested_markets=true&category=Sports&limit=200`;
+      }
+
+      console.log("[MRKT] Fetching Kalshi events from:", url);
+
+      const response = await fetch(url, {
+        headers: {
+          Accept: "application/json",
+        },
+        next: { revalidate: 60 }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Kalshi fetch failed: ${response.status}`);
+      }
+
+      const data = await response.json() as { events: KalshiEvent[]; cursor?: string };
 
       const markets: UnifiedMarket[] = [];
 
