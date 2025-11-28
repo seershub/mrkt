@@ -368,7 +368,6 @@ export function MarketGrid() {
               <MarketCard
                 key={market.id}
                 market={market}
-                onSelect={handleMarketSelect}
               />
             ))}
           </AnimatePresence>
