@@ -1,31 +1,56 @@
-import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import { Providers } from "@/components/providers/Providers";
 import "./globals.css";
-import { ConsoleLogger } from "@/components/debug/ConsoleLogger";
-
-const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "MRKT | Poly SeersHub",
-  description: "Unified Sports Prediction Markets",
+  title: "MRKT - Prediction Market Aggregator",
+  description:
+    "Trade prediction markets across Polymarket and Kalshi. Find arbitrage opportunities and maximize your edge.",
+  keywords: [
+    "prediction markets",
+    "polymarket",
+    "kalshi",
+    "arbitrage",
+    "crypto trading",
+    "market aggregator",
+    "sports betting",
+    "politics",
+  ],
+  authors: [{ name: "MRKT" }],
+  openGraph: {
+    title: "MRKT - Prediction Market Aggregator",
+    description: "Trade prediction markets across Polymarket and Kalshi",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "MRKT - Prediction Market Aggregator",
+    description: "Trade prediction markets across Polymarket and Kalshi",
+  },
+  robots: {
+    index: true,
+    follow: true,
+  },
 };
 
-import { Providers } from "@/components/providers";
-import { Toaster } from "sonner";
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+  themeColor: "#0a0a0b",
+};
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
   return (
-    <html lang="en" className="dark">
-      <body className={inter.className}>
-        <Providers>
-          {children}
-          <ConsoleLogger />
-          <Toaster position="bottom-right" theme="dark" />
-        </Providers>
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <body
+        className="font-sans antialiased bg-background text-foreground min-h-screen"
+      >
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
